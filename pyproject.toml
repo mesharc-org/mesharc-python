@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mesharc"
+version = "0.1.2"
+description = "Python client for the MeshArc API: a URL in, clean content out, and a record of what changed."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["httpx>=0.25"]
+
+keywords = ["scraping", "crawler", "web-data", "change-detection", "sitemap", "markdown", "llm"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Internet :: WWW/HTTP",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0; python_version >= '3.10'"]
+dev = ["pytest>=8", "build", "twine"]
+
+[project.scripts]
+mesharc-mcp = "mesharc.mcp:main"
+
+[project.urls]
+Homepage = "https://mesharc.dev"
+Documentation = "https://mesharc.dev/docs/sdks"
+Source = "https://github.com/Siddharth-DWT/mesharc-python"
+Issues = "https://github.com/Siddharth-DWT/mesharc-python/issues"
+
+[tool.setuptools.packages.find]
+include = ["mesharc*"]
+
+[tool.setuptools.package-data]
+mesharc = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
