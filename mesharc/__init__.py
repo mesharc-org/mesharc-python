@@ -200,7 +200,7 @@ class _Runs:
             run = self.get(project_id, run_id)
             if run["status"] != "running" and not run.get("queued"):
                 return run
-            if time.time() > deadline:
+            if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"run {run_id} is still {run['status']} after {timeout}s", run_id)
             time.sleep(poll)
 
@@ -244,7 +244,7 @@ class Crawl:
             e = self.refresh(formats)
             if not _running(e["status"]):
                 return e
-            if time.time() > deadline:
+            if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"crawl {self.id} is still {e['status']} after {timeout}s", self.id)
             time.sleep(poll)
 
@@ -272,7 +272,7 @@ class Crawl:
                 continue
             if not wait or not _running(page["status"]):
                 return
-            if time.time() > deadline:
+            if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"crawl {self.id} is still {page['status']} after {timeout}s", self.id)
             time.sleep(poll)
 
@@ -324,7 +324,7 @@ class MeshArc:
             r = self._h("GET", f"/playground/{job['id']}")
             if not _running(r["status"]):
                 return r
-            if time.time() > deadline:
+            if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"extraction {job['id']} is still {r['status']} after {timeout}s", job["id"])
             time.sleep(poll)
 
@@ -373,7 +373,7 @@ class MeshArc:
                 return (out.get("data") or [{}])[0]
             if not _running(out.get("status")):
                 raise MeshArcError(502, out.get("error") or f"scrape {out.get('status')}", "job_failed")
-            if time.time() > deadline:
+            if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"scrape {out['id']} is still {out['status']} after {timeout}s", out["id"])
             time.sleep(poll)
             out = self._h("GET", f"/scrape/{out['id']}", params={"formats": formats})
@@ -386,7 +386,7 @@ class MeshArc:
             r = self._h("GET", f"/scrape/{batch_id}", params={"formats": formats})
             if not wait or not _running(r["status"]):
                 return r
-            if time.time() > deadline:
+            if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"batch {batch_id} is still {r['status']} after {timeout}s", batch_id)
             time.sleep(poll)
 
@@ -432,7 +432,7 @@ class MeshArc:
         params = {k: v for k, v in (("search", search), ("limit", limit)) if v}
         deadline = time.time() + timeout
         while out.get("status") == "running":
-            if time.time() > deadline:
+            if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"map {out['id']} is still reading {url} after {timeout}s", out["id"])
             time.sleep(poll)
             out = self._h("GET", f"/map/{out['id']}", params=params or None)
