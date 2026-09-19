@@ -31,8 +31,8 @@ mesharc-mcp = "mesharc.mcp:main"
 [project.urls]
 Homepage = "https://mesharc.dev"
 Documentation = "https://mesharc.dev/docs/sdks"
-Source = "https://github.com/Siddharth-DWT/mesharc-python"
-Issues = "https://github.com/Siddharth-DWT/mesharc-python/issues"
+Source = "https://github.com/mesharc-org/mesharc-python"
+Issues = "https://github.com/mesharc-org/mesharc-python/issues"
 
 [tool.setuptools.packages.find]
 include = ["mesharc*"]

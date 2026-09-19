@@ -239,8 +239,8 @@ Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_pr
 The client is a thin wrapper: every method is one API call and returns the API's JSON as a `dict`. The full reference is at [mesharc.dev/docs/api](https://mesharc.dev/docs/api). Call `arc.close()` when you are done, or use the client as a context manager.
 
 - Documentation: [mesharc.dev/docs](https://mesharc.dev/docs)
-- Node client: `npm install mesharc` — [mesharc-node](https://github.com/Siddharth-DWT/mesharc-node)
-- Issues and pull requests: [mesharc-python](https://github.com/Siddharth-DWT/mesharc-python)
+- Node client: `npm install mesharc` — [mesharc-node](https://github.com/mesharc-org/mesharc-node)
+- Issues and pull requests: [mesharc-python](https://github.com/mesharc-org/mesharc-python)
 - Questions: hello@mesharc.dev
 
 MIT.
