@@ -234,6 +234,12 @@ claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 
 Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_project`, `list_projects`, `create_project`, `start_run`, `list_pages`, `get_page`, `get_changes`, `search_pages`, `recrawl_pages`. Every tool is a call through this client, trimmed where a body would swamp a context window (markdown is capped per page; ask for one page to get all of it).
 
+## Privacy and security
+
+The client talks to one host — the API base URL, `https://api.mesharc.dev` unless `MESHARC_API_URL` or `base_url=` says otherwise — and to nothing else. The key travels only as a bearer header, only over HTTPS. Nothing is written to disk, no telemetry is sent, and the only environment variables read are `MESHARC_API_KEY` and `MESHARC_API_URL`.
+
+What MeshArc keeps about you and about the pages you crawl, and for how long, is in the [privacy policy](https://mesharc.dev/legal/privacy). How the service is secured is on the [security page](https://mesharc.dev/legal/security). To report a vulnerability in this client or in the service, write to security@mesharc.dev rather than opening a public issue — see [SECURITY.md](https://github.com/mesharc-org/mesharc-python/blob/main/SECURITY.md).
+
 ## Anything else
 
 The client is a thin wrapper: every method is one API call and returns the API's JSON as a `dict`. The full reference is at [mesharc.dev/docs/api](https://mesharc.dev/docs/api). Call `arc.close()` when you are done, or use the client as a context manager.

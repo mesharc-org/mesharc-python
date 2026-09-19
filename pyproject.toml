@@ -33,6 +33,8 @@ Homepage = "https://mesharc.dev"
 Documentation = "https://mesharc.dev/docs/sdks"
 Source = "https://github.com/mesharc-org/mesharc-python"
 Issues = "https://github.com/mesharc-org/mesharc-python/issues"
+Privacy = "https://mesharc.dev/legal/privacy"
+Security = "https://github.com/mesharc-org/mesharc-python/blob/main/SECURITY.md"
 
 [tool.setuptools.packages.find]
 include = ["mesharc*"]
