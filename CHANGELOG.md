@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- `SECURITY.md`: how to report a vulnerability, and what the client does with your data.
+- README section on privacy and security; Privacy and Security links on the PyPI page.
+- `LICENSE`, `SECURITY.md` and `CHANGELOG.md` ship in the source distribution.
+
 ## 0.1.2
 
 - The MCP server ships in the package: `pip install "mesharc[mcp]"`, then `mesharc-mcp`.
