@@ -6,9 +6,18 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- The client paces itself against the API key's rate limit. When a response's `X-RateLimit-Remaining` header shows the key is almost out of requests, the next request and the waiting loops (`wait=True`) hold until the window resets instead of being refused.
+- MCP server: `describe_project_config` (every project setting, its meaning and default), `get_project` and `update_project`.
+
 ### Changed
 
 - Requires Python 3.10 or newer. Python 3.9 reached its end of life in October 2025.
+- MCP server: one API client for the server's lifetime, so the rate-limit window carries across tool calls.
+- MCP server: `scrape_urls` and `crawl_site` send an idempotency key, so a retried tool call reuses the same job instead of starting another.
+- MCP server: `scrape_urls` and `extract_url` read PDFs, Word files and spreadsheets unless `parse_documents` is false.
+- MCP server: clearer descriptions of `include_paths` and `exclude_paths`, and of what `config` can hold.
 
 ### Fixed
 

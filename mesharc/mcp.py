@@ -11,7 +11,10 @@ Every tool is a call through the Python client, so what the agent gets
 is what the API gives.
 """
 
+import hashlib
+import json
 import os
+import uuid
 
 try:
     from mcp.server.mcpserver import MCPServer
@@ -37,11 +40,27 @@ server = MCPServer(
 )
 
 
+class _Shared(MeshArc):
+    """One client for the server's life. The tools open it with `with`,
+    which for a shared client must not close it -- and the client's memory
+    of the key's rate-limit window has to outlive one tool call, or every
+    call starts blind and the first after a busy one is refused."""
+
+    def __exit__(self, *exc):
+        return None
+
+
+_CLIENT = None
+
+
 def _client():
+    global _CLIENT
     key = os.environ.get("MESHARC_API_KEY") or ""
     if not key:
         raise RuntimeError("MESHARC_API_KEY is not set")
-    return MeshArc(key, base_url=os.environ.get("MESHARC_API_URL") or None)
+    if _CLIENT is None:
+        _CLIENT = _Shared(key, base_url=os.environ.get("MESHARC_API_URL") or None)
+    return _CLIENT
 
 
 def _trim_page(p):
@@ -51,6 +70,25 @@ def _trim_page(p):
                 p[k] = p[k][:MARKDOWN_CAP] + f"\n… [{len(p[k]) - MARKDOWN_CAP} more characters; fetch this page alone for all of it]"
         p.pop("response", None)
     return p
+
+
+def _with_documents(config, parse_documents):
+    """A PDF, a Word file or a spreadsheet handed to an assistant should be
+    read, not reported as skipped: documents are parsed unless the caller
+    says otherwise or the config already decides."""
+    cfg = dict(config or {})
+    cfg.setdefault("parse_documents", bool(parse_documents))
+    return cfg
+
+
+def _key(*parts):
+    """An idempotency key for one call, stable for the same inputs within
+    this server's life, so a repeated tool call is the same job."""
+    raw = json.dumps(parts, sort_keys=True, default=str)
+    return "mcp-" + _SESSION + "-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+_SESSION = uuid.uuid4().hex[:8]
 
 
 def _safe(fn):
@@ -63,17 +101,23 @@ def _safe(fn):
 
 
 @server.tool(description="Scrape a list of URLs (up to 500) into markdown, no project needed. Waits for the batch. "
-                         "One URL is answered in the same request where the page is quick. "
+                         "One URL is answered in the same request where the page is quick. PDFs, Word files and "
+                         "spreadsheets are read as text unless parse_documents is false. "
                          "`config` is any subset of a project config, e.g. {\"formats\": [\"markdown\", \"text\"], \"concurrency\": 4, \"render_js\": \"always\"}.")
-def scrape_urls(urls: list[str], config: dict | None = None, formats: str = "markdown") -> dict:
+def scrape_urls(urls: list[str], config: dict | None = None, formats: str = "markdown",
+                parse_documents: bool = True) -> dict:
     def go():
+        cfg = _with_documents(config, parse_documents)
+        # A key of our own, so a retry -- the client's on a dropped
+        # connection, the assistant's on a 429 -- lands on the same job.
+        key = _key("scrape", urls, cfg, formats)
         with _client() as s:
             if len(urls) == 1:
                 # One URL takes the synchronous path: the API holds the
                 # request open for the page rather than making us poll.
                 return {"status": "done", "urls": 1,
-                        "pages": [_trim_page(s.scrape(urls[0], config=config, formats=formats))]}
-            b = s.scrape(urls, config=config, formats=formats)
+                        "pages": [_trim_page(s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key))]}
+            b = s.scrape(urls, config=cfg, formats=formats, idempotency_key=key)
             b["pages"] = [_trim_page(p) for p in b.get("pages", [])[:PAGES_CAP]]
             return b
     return _safe(go)
@@ -84,10 +128,10 @@ def scrape_urls(urls: list[str], config: dict | None = None, formats: str = "mar
                          "when needed or when render_js is 'always'. Browser `actions` (click, type, select, press, "
                          "wait, scroll; a click with repeat 'until_gone' for Load-more buttons; `each` to click "
                          "every match of a selector and run nested steps) run before the page is read.")
-def extract_url(url: str, config: dict | None = None) -> dict:
+def extract_url(url: str, config: dict | None = None, parse_documents: bool = True) -> dict:
     def go():
         with _client() as s:
-            r = s.extract(url, config=config)
+            r = s.extract(url, config=_with_documents(config, parse_documents))
             if r.get("page"):
                 r["page"] = _trim_page(r["page"])
                 r["page"].pop("links", None)
@@ -112,6 +156,8 @@ def map_site(url: str, search: str | None = None, limit: int = 1000) -> dict:
 @server.tool(description="Crawl a whole site once and return its pages -- no project needed. Follows links from the "
                          "URL given, reads the sitemap, and stops at `limit` pages. Returns when the crawl finishes "
                          "(minutes for a large limit); the pages come back with markdown, capped per page. "
+                         "`include_paths` and `exclude_paths` are globs over the URL path -- '/blog/*' for a section, "
+                         "'*.pdf' for documents; a bare '/blog/' matches only that one page. "
                          "`crawl_id` in the result can be handed to keep_crawl_as_project.")
 def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: list[str] | None = None,
                exclude_paths: list[str] | None = None, config: dict | None = None) -> dict:
@@ -124,7 +170,7 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
                 opts["excludePaths"] = exclude_paths
             if config:
                 opts["config"] = config
-            job = s.crawl(url, **opts)
+            job = s.crawl(url, idempotency_key=_key("crawl", url, opts), **opts)
             pages = [_trim_page(p) for p in job.pages(limit=50)][:PAGES_CAP]
             e = job.envelope
             return {"crawl_id": job.id, "status": e.get("status"), "url": url,
@@ -150,10 +196,98 @@ def list_projects() -> list | dict:
                           for p in _client().projects.list()])
 
 
+# The settings an assistant is likely to set, with what each means. The
+# full list, with defaults, comes back from describe_project_config; this
+# is the vocabulary that turns "only the blog, weekly, rendered" into a
+# config without guessing key names.
+CONFIG_GUIDE = {
+    "include_paths": "list of globs over the URL path to crawl, e.g. ['/blog/*'] (which takes /blog itself too); "
+                     "empty means the whole site. This is THE setting for 'only this section': it applies to "
+                     "links and to sitemap URLs alike",
+    "exclude_paths": "list of globs to leave out, e.g. ['/tag/*', '*.pdf']; an exclude wins over an include",
+    "sitemap_include": "globs over sitemap FILE urls or section labels (e.g. ['sitemap-posts.xml']) on a site with "
+                       "several sitemap files; leave empty for a section of pages -- use include_paths for that",
+    "sitemap_exclude": "globs over sitemap file urls or section labels to drop; usually empty",
+    "crawl_mode": "'sitemap_first' (declared URLs, then links; default), 'sitemap_only' (exactly the declared URLs), 'links' (follow links only)",
+    "max_pages": "the most pages one run reads (plan cap applies)",
+    "max_depth": "how many links deep from the seed (0 = the seed only)",
+    "crawl_delay_ms": "milliseconds between requests to the host (default 1000)",
+    "concurrency": "pages fetched at once (1-8)",
+    "render_js": "'auto' (a browser only when the page needs one; default), 'always', 'never'",
+    "max_tier": "the highest rung allowed: 'http', 'browser', 'stealth'",
+    "max_credits_per_page": "cap on what one page may cost; 0 = no cap",
+    "formats": "list of bodies to keep: 'markdown', 'text', 'cleanHtml', 'rawHtml', 'links', 'screenshot', 'json'",
+    "only_main_content": "true drops navigation, headers, footers and sidebars from the markdown",
+    "include_tags": "CSS selectors to keep, e.g. ['article', '.post']",
+    "exclude_tags": "CSS selectors to drop, e.g. ['.comments', '#newsletter']",
+    "min_words": "pages shorter than this are recorded but not compared (0 = keep all)",
+    "languages": "list of language codes to keep, e.g. ['en']; empty = all",
+    "parse_documents": "true reads PDFs, Word and spreadsheet files the crawl meets",
+    "respect_robots": "obey robots.txt (default true)",
+    "allow_subdomains": "follow links to subdomains of the seed's domain",
+    "use_proxy": "route through the residential exits (costs more; for walled sites)",
+    "json_schema": "a JSON schema of fields to extract from every page",
+    "llm_extract": "true lets a model fill fields the markup could not",
+    "webhook_url": "where to POST run and change events",
+    "webhook_events": "which events to send, e.g. ['run.finished', 'page.changed']",
+    "notify_min_words": "a change smaller than this many words is not notified",
+    "chat_url": "a Slack, Discord, Teams, Mattermost or Google Chat incoming-webhook URL: the run record is posted "
+                "there when a run finds something (never when nothing changed). Read back masked; sending the "
+                "mask keeps it",
+    "change_digest": "{connection_id, focus}: after each compared run a model (an llm connection the workspace "
+                     "added under Connectors) writes a paragraph on what changed and why it matters, with up to "
+                     "five points; 'focus' says what the reader cares about, e.g. 'pricing and plan limits'. "
+                     "null = off. Carried by the email, the chat message and the run.finished webhook",
+    "actions": "browser steps before reading (click, type, scroll, wait...); see the docs",
+    "wait_for_selector": "in the browser, wait until this selector appears before reading",
+}
+
+
+@server.tool(description="Every project setting an assistant can set: name, meaning, and the default. Read this "
+                         "before create_project or update_project when the request names a section, a schedule, "
+                         "a format, a limit or a behaviour -- the keys are exact, guessed names are refused.")
+def describe_project_config() -> dict:
+    def go():
+        with _client() as s:
+            defaults = (s.meta().get("configDefaults") or {})
+            return {"settings": [{"key": k, "meaning": v, "default": defaults.get(k)} for k, v in CONFIG_GUIDE.items()],
+                    "other_keys": sorted(k for k in defaults if k not in CONFIG_GUIDE),
+                    "schedules": ["manual", "hourly", "daily", "weekly"],
+                    "note": "include_paths and exclude_paths are globs over the URL path: '/blog/*' is the blog section "
+                            "(its index included), '/blog/' is one page. To limit a project to a section, set include_paths "
+                            "and nothing else; sitemap_include is for choosing among sitemap files, not pages."}
+    return _safe(go)
+
+
+@server.tool(description="One project with its settings, schedule and last run -- read it before changing it.")
+def get_project(project_id: str) -> dict:
+    return _safe(lambda: _client().projects.get(project_id))
+
+
 @server.tool(description="Create a project for a site (seed URL) so it is crawled on a schedule and its changes recorded. "
-                         "schedule: manual | hourly | daily | weekly.")
+                         "`config` is any subset of the settings describe_project_config lists -- for one section of "
+                         "a site pass include_paths (globs), e.g. {\"include_paths\": [\"/blog/*\"]}; map_site first "
+                         "shows how the site is laid out. schedule: manual | hourly | daily | weekly.")
 def create_project(seed: str, name: str | None = None, schedule: str = "manual", config: dict | None = None) -> dict:
     return _safe(lambda: _client().projects.create(seed, name=name, schedule=schedule, config=config))
+
+
+@server.tool(description="Change a project: its name, schedule, or any settings in `config` (only the keys given "
+                         "change; the rest stay). The next run uses the new settings.")
+def update_project(project_id: str, name: str | None = None, schedule: str | None = None, config: dict | None = None) -> dict:
+    def go():
+        fields: dict = {}
+        if name is not None:
+            fields["name"] = name
+        if schedule is not None:
+            fields["schedule"] = schedule
+        if config:
+            fields["config"] = config
+        if not fields:
+            return {"error": "nothing to change: give a name, a schedule or config"}
+        with _client() as s:
+            return s.projects.update(project_id, **fields)
+    return _safe(go)
 
 
 @server.tool(description="Start a crawl of a project now. With wait=true, returns the finished run (may take minutes).")
