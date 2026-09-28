@@ -1,5 +1,19 @@
 # Changelog
 
+All notable changes to this package are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[SemVer](https://semver.org).
+
+## Unreleased
+
+### Changed
+
+- Requires Python 3.10 or newer. Python 3.9 reached its end of life in October 2025.
+
+### Fixed
+
+- The `mcp` extra requires `mcp` 2.0 or newer. The MCP server uses the `MCPServer` class that `mcp` 2.0 introduced, so with an older `mcp` installed it could not start.
+
 ## 0.1.3
 
 - `SECURITY.md`: how to report a vulnerability, and what the client does with your data.

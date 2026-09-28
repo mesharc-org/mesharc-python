@@ -1,0 +1,34 @@
+name: Bug report
+description: Something in the Python client does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not post API keys, and report security problems privately (see SECURITY.md), not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Code to reproduce
+      description: The smallest snippet that shows the problem.
+      render: python
+  - type: input
+    id: request-id
+    attributes:
+      label: Request id
+      description: From the MeshArcError, if there was one. It lets us find the request in our logs.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: mesharc version and Python version.
+      placeholder: mesharc 0.2.0, Python 3.12
+    validations:
+      required: true

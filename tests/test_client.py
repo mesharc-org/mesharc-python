@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from mesharc import Crawl, MeshArc, MeshArcError, MeshArcTimeoutError, __version__
+from mesharc import Crawl, MeshArc, MeshArcError, __version__
 
 
 def scripted(*responses):
