@@ -232,7 +232,7 @@ MESHARC_API_KEY=mesharc_... mesharc-mcp          # serves over stdio
 claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 ```
 
-Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_project`, `list_projects`, `create_project`, `start_run`, `list_pages`, `get_page`, `get_changes`, `search_pages`, `recrawl_pages`. Every tool is a call through this client, trimmed where a body would swamp a context window (markdown is capped per page; ask for one page to get all of it).
+Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_project`, `list_projects`, `describe_project_config`, `get_project`, `create_project`, `update_project`, `start_run`, `list_pages`, `get_page`, `get_changes`, `search_pages`, `recrawl_pages`. Every tool is a call through this client, trimmed where a body would swamp a context window (markdown is capped per page; ask for one page to get all of it).
 
 ## Privacy and security
 

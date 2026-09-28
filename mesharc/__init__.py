@@ -89,6 +89,29 @@ class _Http:
             timeout=timeout,
         )
         self._max_retries = max(0, int(max_retries))
+        # What the last response said about the key's rate limit, so a
+        # polling loop can slow down before it is refused rather than after.
+        self._remaining: Optional[int] = None
+        self._reset_at: float = 0.0
+
+    def _note_limits(self, r: httpx.Response) -> None:
+        try:
+            if "X-RateLimit-Remaining" in r.headers:
+                self._remaining = int(r.headers["X-RateLimit-Remaining"])
+                self._reset_at = time.monotonic() + float(r.headers.get("X-RateLimit-Reset") or 0)
+        except ValueError:
+            pass
+
+    def pace(self, floor: int = 3) -> None:
+        """Wait out the window when the key is nearly out of requests. A
+        wait loop that polls every few seconds would otherwise spend a
+        small plan's minute on polling and be refused for the call that
+        matters."""
+        if self._remaining is not None and self._remaining <= floor:
+            left = self._reset_at - time.monotonic()
+            if left > 0:
+                time.sleep(min(left, 60.0))
+            self._remaining = None
 
     def __call__(self, method: str, path: str, idempotency_key: Optional[str] = None, **kw: Any) -> Any:
         if idempotency_key:
@@ -97,6 +120,9 @@ class _Http:
         repeatable = method in ("GET", "DELETE") or bool(idempotency_key)
         attempt = 0
         while True:
+            # Out of requests this minute: wait for the window rather than
+            # send a call that will only be refused.
+            self.pace(floor=0)
             try:
                 r = self._c.request(method, path, **kw)
             except httpx.TimeoutException as exc:
@@ -111,6 +137,7 @@ class _Http:
                     time.sleep(self._backoff(attempt))
                     continue
                 raise MeshArcError(0, f"network error: {exc}", "network") from exc
+            self._note_limits(r)
             if r.status_code in RETRY_STATUSES and repeatable and attempt < self._max_retries:
                 attempt += 1
                 time.sleep(self._retry_after(r) or self._backoff(attempt))
@@ -203,6 +230,7 @@ class _Runs:
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"run {run_id} is still {run['status']} after {timeout}s", run_id)
             time.sleep(poll)
+            self._h.pace()
 
     def cancel(self, project_id: str, run_id: str) -> Json:
         return self._h("POST", f"/projects/{project_id}/runs/{run_id}/cancel")
@@ -247,6 +275,7 @@ class Crawl:
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"crawl {self.id} is still {e['status']} after {timeout}s", self.id)
             time.sleep(poll)
+            self._h.pace()
 
     def pages(self, formats: str = "markdown", limit: int = 25, wait: bool = True, poll: float = 3.0,
               timeout: float = 3600) -> Iterator[Json]:
@@ -275,6 +304,7 @@ class Crawl:
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"crawl {self.id} is still {page['status']} after {timeout}s", self.id)
             time.sleep(poll)
+            self._h.pace()
 
     def keep(self, name: Optional[str] = None, schedule: Optional[str] = None,
              retention: Optional[str] = None) -> Json:
@@ -308,8 +338,6 @@ class MeshArc:
         self.projects = _Projects(self._h)
         self.runs = _Runs(self._h)
 
-    # ------------------------------------------------------------ one or many URLs
-
     def extract(self, url: str, config: Optional[Json] = None, wait: bool = True, poll: float = 2.0,
                 timeout: float = 300) -> Json:
         """One URL with every format, as the app's playground reads it."""
@@ -327,6 +355,7 @@ class MeshArc:
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"extraction {job['id']} is still {r['status']} after {timeout}s", job["id"])
             time.sleep(poll)
+            self._h.pace()
 
     def scrape(self, urls: Union[str, Iterable[str]], config: Optional[Json] = None,
                webhook_url: Optional[str] = None, formats: str = "markdown", wait: bool = True,
@@ -376,6 +405,7 @@ class MeshArc:
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"scrape {out['id']} is still {out['status']} after {timeout}s", out["id"])
             time.sleep(poll)
+            self._h.pace()
             out = self._h("GET", f"/scrape/{out['id']}", params={"formats": formats})
 
     def batch(self, batch_id: str, formats: str = "markdown", wait: bool = False, poll: float = 3.0,
@@ -389,8 +419,7 @@ class MeshArc:
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"batch {batch_id} is still {r['status']} after {timeout}s", batch_id)
             time.sleep(poll)
-
-    # ---------------------------------------------------------------- a whole site
+            self._h.pace()
 
     def crawl(self, url: str, wait: bool = False, poll: float = 3.0, timeout: float = 3600,
               idempotency_key: Optional[str] = None, **opts: Any) -> Crawl:
@@ -435,12 +464,11 @@ class MeshArc:
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"map {out['id']} is still reading {url} after {timeout}s", out["id"])
             time.sleep(poll)
+            self._h.pace()
             out = self._h("GET", f"/map/{out['id']}", params=params or None)
         if out.get("status") != "done":
             raise MeshArcError(502, out.get("error") or "no sitemap could be read", "job_failed")
         return out
-
-    # ---------------------------------------------------------- what a project holds
 
     def pages(self, project_id: str, run_id: Optional[str] = None) -> Json:
         """The pages of a run (the latest finished run by default)."""
@@ -498,8 +526,6 @@ class MeshArc:
                 for chunk in r.iter_bytes():
                     fh.write(chunk)
         return path
-
-    # --------------------------------------------------------------------- workspace
 
     def me(self) -> Json:
         """The workspace, its plan and limits, and what this key may do."""
