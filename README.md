@@ -7,7 +7,7 @@ The Python client for the [MeshArc](https://mesharc.dev) API: a URL in, clean co
 - **Map** what a site declares in its sitemaps before fetching any of it.
 - **Watch** a site over time: projects, scheduled runs, and a change record — pages added, removed, modified, field by field.
 
-Python 3.9 or newer. One dependency (`httpx`). Fully typed.
+Python 3.10 or newer. One dependency (`httpx`). Fully typed.
 
 ## Install
 
