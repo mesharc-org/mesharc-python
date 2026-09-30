@@ -6,6 +6,26 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-30
+
+### Added
+
+- **The MCP server speaks HTTP, with OAuth.** `mesharc-mcp --http --host H --port P` serves streamable HTTP as an OAuth 2.1 resource server, so a client can be added by URL instead of installed. Stdio stays the default and is unchanged: `mesharc-mcp` on its own behaves exactly as before.
+- In HTTP mode every request acts as the caller who sent it. The server holds no key of its own, verifies each bearer token against the API's `/oauth/introspect`, and **never** reads `MESHARC_API_KEY` -- it refuses to build a client without a caller's token, because `MeshArc()` would otherwise fall back to that variable and every caller would act inside the operator's workspace. If the variable is set, startup says it is being ignored.
+- `get_job(kind, id, project_id=None)`, a seventeenth tool, to follow a crawl, run or batch a long tool handed back.
+- `MESHARC_MCP_WAIT` (default 25s) bounds how long a long tool holds a connection in HTTP mode. `crawl_site`, `start_run(wait=true)`, a multi-URL `scrape_urls` and `keep_crawl_as_project` return `{status: "running", job: {...}}` when the budget runs out, and the job goes on server-side. Stdio keeps blocking, where the caller is a local process that asked for the answer.
+- `MESHARC_MCP_ALLOWED_ORIGINS` adds browser-based MCP clients to the Origin allow-list by configuration.
+
+### Changed
+
+- The `mcp` extra pins `mcp>=2.2,<3`. 2.2 is where the resource-server APIs this uses settled, and `validate_token_resource` is set explicitly rather than left to change default in 3.0.
+- Idempotency keys are scoped to the OAuth grant in HTTP mode, not to the server process. Two workspaces asking for the same URL are two jobs, and a restart no longer makes a new prefix.
+
+### Fixed
+
+- HTTP mode passes its own `transport_security`. Binding `127.0.0.1` makes the SDK enable DNS-rebinding protection with a localhost-only `Host` allow-list, so behind a reverse proxy -- where the `Host` is the public domain -- every request would have been refused. Origins are allow-listed for the same reason: a present `Origin` that is not listed is refused, which a browser-based client would have hit and a server-to-server one would not.
+- HTTP mode checks the introspection secret at startup and exits naming it. A wrong secret makes every token look invalid, so the service would otherwise have started clean and then refused everything with nothing pointing at the cause.
+
 ## 0.2.0 - 2026-09-28
 
 ### Added

@@ -1,27 +1,49 @@
 """MeshArc as an MCP server: the API's verbs as tools an agent can call.
 
+Two ways to run it, differing in one thing: whose credential a request acts
+with.
+
+*Stdio*, the default, on the user's own machine with their own key:
+
     pip install "mesharc[mcp]"                      # Python 3.10+
-    MESHARC_API_KEY=mesharc_... mesharc-mcp         # stdio, for Claude Desktop, Claude Code, Cursor
+    MESHARC_API_KEY=mesharc_... mesharc-mcp         # Claude Desktop, Claude Code, Cursor
 
     claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 
-Tools return the API's JSON, trimmed where a body would swamp a context
-window (markdown is capped per page; ask for one page to get all of it).
-Every tool is a call through the Python client, so what the agent gets
-is what the API gives.
+*HTTP*, hosted, for clients that only speak remote MCP -- a URL to paste
+instead of an install:
+
+    MESHARC_MCP_PUBLIC_URL=https://mcp.example.dev/mcp \\
+    MESHARC_OAUTH_ISSUER=https://api.example.dev \\
+    MESHARC_INTROSPECT_SECRET=...                    \\
+      mesharc-mcp --http --host 127.0.0.1 --port 8040
+
+In that mode the server holds no key of its own. Each request carries the
+caller's OAuth token, which is verified against the API and then used to make
+the call, so one process serves many workspaces without any of them reaching
+another's. `MESHARC_API_KEY` is never read there -- see `_client`.
+
+Tools return the API's JSON, trimmed where a body would swamp a context window
+(markdown is capped per page; ask for one page to get all of it). Every tool is
+a call through the Python client, so what the agent gets is what the API gives.
+A tool that would otherwise hold a connection open for minutes hands back a job
+instead, for `get_job` to follow.
 """
 
+import argparse
 import hashlib
 import json
 import os
+import time
 import uuid
+from collections import OrderedDict
 
 try:
     from mcp.server.mcpserver import MCPServer
 except ImportError as exc:  # pragma: no cover
     raise SystemExit('The MCP server needs the "mcp" package: pip install "mesharc[mcp]"') from exc
 
-from mesharc import MeshArc, MeshArcError
+from mesharc import MeshArc, MeshArcError, MeshArcTimeoutError
 
 MARKDOWN_CAP = 12_000
 PAGES_CAP = 50
@@ -50,17 +72,87 @@ class _Shared(MeshArc):
         return None
 
 
+# Which mode this process serves. Stdio is the default and behaves exactly as
+# it always has: one key from the environment, one client, waits that block for
+# as long as they like. Hosted is the other world -- many callers, each with
+# their own token, and no key of the server's own at all.
+_HTTP = False
+# What a tool may hold a connection for in hosted mode before it hands back a
+# job id instead. Many MCP hosts time a tool call out well before a minute, and
+# this server cannot know which one is calling.
+WAIT_DEFAULT_S = 25.0
+
 _CLIENT = None
+# Hosted mode: one client per caller, keyed by the hash of their token. The
+# client remembers the rate-limit window the API told it about, and that memory
+# belongs to one key -- shared across tenants, each would start blind and the
+# first call after somebody else's busy patch would be refused.
+_CLIENTS: "OrderedDict[str, _Shared]" = OrderedDict()
+_CLIENTS_MAX = 1024
+
+
+def _token_hash(token):
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def _caller_token():
+    """The token this request arrived with.
+
+    `get_access_token()` reads a contextvar the SDK sets per request, and anyio
+    copies the context into the worker thread a sync tool runs on -- so this
+    works from inside a tool with no wrapping.
+    """
+    from mcp.server.auth.middleware.auth_context import get_access_token
+    at = get_access_token()
+    return getattr(at, "token", None) if at else None
 
 
 def _client():
+    """The client this call acts as.
+
+    Hosted mode takes the caller's own token and **never** reads
+    MESHARC_API_KEY. That is the one line in this file that must not be wrong:
+    with the fallback, every caller would act inside whichever workspace the
+    operator's key belongs to, reading other tenants' pages and spending their
+    credits. So there is no path from here to the environment.
+    """
     global _CLIENT
+    base = os.environ.get("MESHARC_API_URL") or None
+    if _HTTP:
+        token = _caller_token()
+        if not token:
+            raise RuntimeError("this request carried no access token")
+        h = _token_hash(token)
+        found = _CLIENTS.get(h)
+        if found is not None:
+            _CLIENTS.move_to_end(h)
+            return found
+        client = _Shared(token, base_url=base)
+        _CLIENTS[h] = client
+        while len(_CLIENTS) > _CLIENTS_MAX:
+            _CLIENTS.popitem(last=False)
+        return client
     key = os.environ.get("MESHARC_API_KEY") or ""
     if not key:
         raise RuntimeError("MESHARC_API_KEY is not set")
     if _CLIENT is None:
-        _CLIENT = _Shared(key, base_url=os.environ.get("MESHARC_API_URL") or None)
+        _CLIENT = _Shared(key, base_url=base)
     return _CLIENT
+
+
+def _budget():
+    """How long a tool may block, or None for as long as it takes.
+
+    Stdio waits: the caller is a local process that asked for the answer.
+    Hosted does not: the caller is a socket through a proxy, behind a client
+    with a timeout this server never sees.
+    """
+    if not _HTTP:
+        return None
+    try:
+        return max(1.0, float(os.environ.get("MESHARC_MCP_WAIT") or WAIT_DEFAULT_S))
+    except ValueError:
+        return WAIT_DEFAULT_S
 
 
 def _trim_page(p):
@@ -70,6 +162,37 @@ def _trim_page(p):
                 p[k] = p[k][:MARKDOWN_CAP] + f"\n… [{len(p[k]) - MARKDOWN_CAP} more characters; fetch this page alone for all of it]"
         p.pop("response", None)
     return p
+
+
+def _still_running(kind, job_id, counts=None, project_id=None):
+    """What a long tool answers when its budget ran out.
+
+    The job is not cancelled -- it goes on server-side, and `get_job` picks it
+    up. Saying so matters: an assistant told only "running" would start the
+    work again.
+    """
+    job = {"kind": kind, "id": job_id}
+    if project_id:
+        job["project_id"] = project_id
+    return {"status": "running", "job": job, "counts": counts or {},
+            "note": "call get_job with this job to check; it keeps running server-side"}
+
+
+def _crawl_result(job, pages):
+    """A finished crawl, shaped once. `crawl_site` and `get_job` both call
+    this, so the two cannot drift apart."""
+    e = job.envelope
+    return {"crawl_id": job.id, "status": e.get("status"), "url": e.get("url", ""),
+            "pages": [_trim_page(p) for p in pages][:PAGES_CAP],
+            "counts": e.get("counts"), "stop": e.get("stop", ""),
+            "note": ("this crawl is kept for a day unless keep_crawl_as_project is called"
+                     if e.get("ephemeral") else "")}
+
+
+def _batch_result(b):
+    """A finished multi-URL scrape, shaped once."""
+    b["pages"] = [_trim_page(p) for p in b.get("pages", [])[:PAGES_CAP]]
+    return b
 
 
 def _with_documents(config, parse_documents):
@@ -82,10 +205,26 @@ def _with_documents(config, parse_documents):
 
 
 def _key(*parts):
-    """An idempotency key for one call, stable for the same inputs within
-    this server's life, so a repeated tool call is the same job."""
+    """An idempotency key for one call, stable for the same inputs, so a
+    repeated tool call lands on the same job.
+
+    The prefix has to be per caller, not per process. In hosted mode that is
+    the grant: two workspaces asking for the same URL are two jobs, and a
+    restart must not make yesterday's key collide with today's.
+    """
     raw = json.dumps(parts, sort_keys=True, default=str)
-    return "mcp-" + _SESSION + "-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
+    return "mcp-" + _scope() + "-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _scope():
+    """What an idempotency key belongs to: the grant, hosted, and this
+    process otherwise."""
+    if not _HTTP:
+        return _SESSION
+    from mcp.server.auth.middleware.auth_context import get_access_token
+    at = get_access_token()
+    grant = (getattr(at, "claims", None) or {}).get("grant") if at else None
+    return str(grant or getattr(at, "client_id", None) or _SESSION)[:16]
 
 
 _SESSION = uuid.uuid4().hex[:8]
@@ -117,9 +256,17 @@ def scrape_urls(urls: list[str], config: dict | None = None, formats: str = "mar
                 # request open for the page rather than making us poll.
                 return {"status": "done", "urls": 1,
                         "pages": [_trim_page(s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key))]}
-            b = s.scrape(urls, config=cfg, formats=formats, idempotency_key=key)
-            b["pages"] = [_trim_page(p) for p in b.get("pages", [])[:PAGES_CAP]]
-            return b
+            # A list is a batch, and `scrape` waits for every row -- for up to
+            # an hour by default. Hosted, that wait is bounded and the batch id
+            # comes back instead, for get_job to pick up.
+            budget = _budget()
+            if budget is None:
+                return _batch_result(s.scrape(urls, config=cfg, formats=formats, idempotency_key=key))
+            try:
+                return _batch_result(s.scrape(urls, config=cfg, formats=formats,
+                                              idempotency_key=key, timeout=budget))
+            except MeshArcTimeoutError as exc:
+                return _still_running("batch", getattr(exc, "job_id", "") or "")
     return _safe(go)
 
 
@@ -171,12 +318,19 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
             if config:
                 opts["config"] = config
             job = s.crawl(url, idempotency_key=_key("crawl", url, opts), **opts)
-            pages = [_trim_page(p) for p in job.pages(limit=50)][:PAGES_CAP]
-            e = job.envelope
-            return {"crawl_id": job.id, "status": e.get("status"), "url": url,
-                    "pages": pages, "counts": e.get("counts"), "stop": e.get("stop", ""),
-                    "note": ("this crawl is kept for a day unless keep_crawl_as_project is called"
-                             if e.get("ephemeral") else "")}
+            # `pages()` waits for more while the crawl runs, for up to an hour
+            # by default. That is right down a pipe and wrong down a socket, so
+            # hosted mode gives it a budget and hands back the job id instead.
+            budget = _budget()
+            if budget is None:
+                return _crawl_result(job, job.pages(limit=50))
+            try:
+                pages = list(job.pages(limit=50, timeout=budget))
+            except MeshArcTimeoutError:
+                # The budget, not a failure: the crawl is still going, and
+                # `pages()` says so by raising once its deadline passes.
+                return _still_running("crawl", job.id, job.envelope.get("counts"))
+            return _crawl_result(job, pages)
     return _safe(go)
 
 
@@ -290,9 +444,20 @@ def update_project(project_id: str, name: str | None = None, schedule: str | Non
     return _safe(go)
 
 
-@server.tool(description="Start a crawl of a project now. With wait=true, returns the finished run (may take minutes).")
+@server.tool(description="Start a crawl of a project now. With wait=true, returns the finished run; hosted, a run "
+                         "still going after a few seconds comes back as a job to follow with get_job.")
 def start_run(project_id: str, wait: bool = False) -> dict:
-    return _safe(lambda: _client().runs.start(project_id, wait=wait))
+    def go():
+        s = _client()
+        budget = _budget()
+        if not wait or budget is None:
+            return s.runs.start(project_id, wait=wait)
+        try:
+            return s.runs.start(project_id, wait=True, timeout=budget)
+        except MeshArcTimeoutError as exc:
+            return _still_running("run", getattr(exc, "job_id", "") or "",
+                                  project_id=project_id)
+    return _safe(go)
 
 
 @server.tool(description="The pages of a project's last finished run (or run_id): url, status, depth, words, when changed.")
@@ -333,9 +498,207 @@ def recrawl_pages(project_id: str, urls: list[str]) -> dict:
     return _safe(lambda: _client().recrawl(project_id, urls))
 
 
+@server.tool(description="Follow a job a long tool handed back: a crawl from crawl_site, a run from start_run, or a "
+                         "batch from scrape_urls. Returns its status and counts, and once it has finished, the same "
+                         "result the original tool would have given. kind: crawl | run | batch. A run needs its "
+                         "project_id. Costs nothing.")
+def get_job(kind: str, id: str, project_id: str | None = None) -> dict:
+    """The other half of a bounded wait.
+
+    A tool that stopped waiting has to leave something to come back to, and
+    this is it. The result of a finished job is shaped by the same helpers the
+    original tool uses, so what an assistant gets by polling is what it would
+    have got by waiting.
+    """
+    def go():
+        s = _client()
+        if kind == "crawl":
+            job = s.get_crawl(id)
+            status = job.envelope.get("status") or ""
+            if status in ("done", "complete", "failed", "cancelled"):
+                return _crawl_result(job, job.pages(limit=50, wait=False))
+            return _still_running("crawl", id, job.envelope.get("counts"))
+        if kind == "run":
+            if not project_id:
+                return {"error": "a run needs its project_id", "code": "validation"}
+            run = s.runs.get(project_id, id)
+            if run.get("status") == "running" or run.get("queued"):
+                return _still_running("run", id, run.get("counts"), project_id=project_id)
+            return run
+        if kind == "batch":
+            return _batch_result(s.batch(id))
+        return {"error": f"kind must be crawl, run or batch, not {kind!r}", "code": "validation"}
+    return _safe(go)
+
+
+class _IntrospectionVerifier:
+    """Verify a bearer token by asking the API about it.
+
+    Opaque tokens and an introspection call, rather than something signed this
+    server could check alone. The trade is deliberate: revocation is instant,
+    because there is nothing cached to outlive it, and the cost is one API hop
+    on a cold call plus a hard dependency on the API being up.
+
+    It fails closed. A timeout, a 5xx or an answer that does not parse returns
+    None, which the SDK turns into a 401. There is no branch here that lets a
+    request through because the check could not be made.
+    """
+
+    def __init__(self, issuer, resource, secret, cache_s=60.0):
+        self._url = issuer.rstrip("/") + "/oauth/introspect"
+        self._resource = resource
+        self._secret = secret
+        self._cache_s = cache_s
+        self._cache: "dict[str, tuple[float, object]]" = {}
+
+    def _ask(self, token):
+        import httpx
+        r = httpx.post(self._url, data={"token": token},
+                       headers={"X-Introspect-Secret": self._secret}, timeout=3.0)
+        r.raise_for_status()
+        return r.json()
+
+    async def verify_token(self, token):
+        from mcp.server.auth.provider import AccessToken
+        now = time.time()
+        h = _token_hash(token)
+        hit = self._cache.get(h)
+        if hit and hit[0] > now:
+            return hit[1]
+        try:
+            body = self._ask(token)
+        except Exception:                                  # noqa: BLE001 -- fail closed, whatever broke
+            return None
+        if not isinstance(body, dict) or not body.get("active"):
+            return None
+        scopes = [s for s in str(body.get("scope") or "").split() if s]
+        at = AccessToken(
+            token=token,
+            client_id=str(body.get("client_id") or ""),
+            scopes=scopes,
+            expires_at=int(body["exp"]) if body.get("exp") else None,
+            resource=body.get("aud") or self._resource,
+            claims={"org": body.get("org"), "grant": body.get("client_id")},
+        )
+        # Only a live answer is cached, and never past the token's own expiry.
+        self._cache[h] = (min(now + self._cache_s, float(at.expires_at or now + self._cache_s)), at)
+        if len(self._cache) > 4096:
+            self._cache.clear()
+        return at
+
+
+def _check_secret(verifier):
+    """Prove the introspection secret works before serving anything.
+
+    A wrong secret makes every token look invalid, so without this the service
+    starts clean and then 401s everything, with nothing pointing at the cause.
+    One deliberately invalid token: `{"active": false}` means the endpoint
+    answered us, and a 401 or 403 means it did not.
+    """
+    import httpx
+    try:
+        r = httpx.post(verifier._url, data={"token": "mesharc_oat_startup-probe"},
+                       headers={"X-Introspect-Secret": verifier._secret}, timeout=5.0)
+    except Exception as exc:                               # noqa: BLE001
+        raise SystemExit(f"cannot reach {verifier._url}: {exc}\n"
+                         "MESHARC_OAUTH_ISSUER has to point at a running MeshArc API.") from exc
+    if r.status_code in (401, 403):
+        raise SystemExit(f"{verifier._url} refused this server's introspection secret.\n"
+                         "MESHARC_INTROSPECT_SECRET must match OAUTH_INTROSPECT_SECRET in the API's environment.")
+    if r.status_code != 200:
+        raise SystemExit(f"{verifier._url} answered {r.status_code}; expected 200 with active=false.")
+
+
+def _transport_security(public_url):
+    """Which Host and Origin headers to admit.
+
+    This has to be passed. Binding 127.0.0.1 makes the SDK turn DNS-rebinding
+    protection on by itself, with an allow-list of localhost only -- and behind
+    a proxy the Host is the public domain, so every request would be refused.
+    The middleware's own default is off, so it is this host-based branch that
+    catches a deployment out.
+
+    Origins matter for the same reason: a present Origin that is not listed is
+    refused. An absent one passes, which is why a server-to-server connector
+    would not notice, and a browser-based client would.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+    from urllib.parse import urlparse
+    p = urlparse(public_url)
+    host = p.netloc
+    origin = f"{p.scheme}://{p.netloc}"
+    extra = [o.strip() for o in (os.environ.get("MESHARC_MCP_ALLOWED_ORIGINS") or "").split(",") if o.strip()]
+    local_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    local_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=([host] if host else []) + local_hosts,
+        allowed_origins=([origin] if host else []) + local_origins + extra,
+    )
+
+
 def main() -> None:
-    """The `mesharc-mcp` command: serve over stdio."""
-    server.run("stdio")
+    """The `mesharc-mcp` command.
+
+        mesharc-mcp                                  # stdio, as it always was
+        mesharc-mcp --http --host 127.0.0.1 --port 8040
+
+    Stdio stays the default, so an existing install is untouched by this.
+    """
+    global _HTTP
+    ap = argparse.ArgumentParser(prog="mesharc-mcp", description="MeshArc as an MCP server.")
+    ap.add_argument("--http", action="store_true",
+                    help="serve streamable HTTP with OAuth instead of stdio")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8040)
+    args = ap.parse_args()
+
+    if not args.http:
+        server.run("stdio")
+        return
+
+    public = (os.environ.get("MESHARC_MCP_PUBLIC_URL") or "").strip()
+    issuer = (os.environ.get("MESHARC_OAUTH_ISSUER") or "").strip()
+    secret = (os.environ.get("MESHARC_INTROSPECT_SECRET") or "").strip()
+    missing = [n for n, v in (("MESHARC_MCP_PUBLIC_URL", public),
+                              ("MESHARC_OAUTH_ISSUER", issuer),
+                              ("MESHARC_INTROSPECT_SECRET", secret)) if not v]
+    if missing:
+        raise SystemExit("http mode needs " + ", ".join(missing))
+    if os.environ.get("MESHARC_API_KEY"):
+        # Not used, and saying so is better than leaving someone to believe it
+        # is the credential requests act with. In http mode each caller brings
+        # their own and this is never read.
+        print("  ! MESHARC_API_KEY is set and will be ignored: in http mode every "
+              "request acts as the caller who sent it.", flush=True)
+
+    from mcp.server.auth.settings import AuthSettings
+    verifier = _IntrospectionVerifier(issuer, public, secret)
+    _check_secret(verifier)
+    _HTTP = True
+
+    # The tools registered on `server` at import, so auth is attached to that
+    # instance rather than a second one being built around it. These are the
+    # two things the streamable-http app reads (mcpserver.server:246-255): the
+    # constructor would only have set the same pair, and it refuses one without
+    # the other, so they are set together here too.
+    # Pydantic URL types, not strings: AuthSettings declares AnyHttpUrl, and a
+    # bad value should be refused here rather than at the first request.
+    from pydantic import AnyHttpUrl
+    server.settings.auth = AuthSettings(
+        issuer_url=AnyHttpUrl(issuer),
+        resource_server_url=AnyHttpUrl(public),
+        required_scopes=["read"],
+        # Explicit in 2.x, the default in 3.0. Without it, a token minted for
+        # another resource would be accepted here.
+        validate_token_resource=True,
+    )
+    server._token_verifier = verifier
+
+    from urllib.parse import urlparse
+    server.run("streamable-http", host=args.host, port=args.port,
+               streamable_http_path=urlparse(public).path or "/mcp",
+               transport_security=_transport_security(public))
 
 
 if __name__ == "__main__":
