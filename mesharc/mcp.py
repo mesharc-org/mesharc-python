@@ -52,18 +52,46 @@ from mesharc import _running
 MARKDOWN_CAP = 12_000
 PAGES_CAP = 50
 
-server = MCPServer(
-    "mesharc",
-    instructions=(
-        "MeshArc turns URLs into clean content and keeps a record of what changed. "
-        "Use scrape_urls for a list of pages, extract_url for one page with every format, "
-        "map_site to see what URLs a site declares before fetching any of them, and "
-        "crawl_site to crawl a whole site once without setting a project up first "
-        "(keep_crawl_as_project turns one of those into a watched project afterwards). "
-        "The project tools are for a site watched over time: its pages, its change record, "
-        "and search inside a run. Blocked pages are reported as blocked, never as missing."
-    ),
+NAME = "mesharc"
+INSTRUCTIONS = (
+    "MeshArc turns URLs into clean content and keeps a record of what changed. "
+    "Use scrape_urls for a list of pages, extract_url for one page with every format, "
+    "map_site to see what URLs a site declares before fetching any of them, and "
+    "crawl_site to crawl a whole site once without setting a project up first "
+    "(keep_crawl_as_project turns one of those into a watched project afterwards). "
+    "The project tools are for a site watched over time: its pages, its change record, "
+    "and search inside a run. Blocked pages are reported as blocked, never as missing."
 )
+
+# The tools, in the order they are declared, with how each was registered.
+# `MCPServer.tool` hands the function straight back, so every tool below stays
+# an ordinary module-level function -- which is what lets the same set be put
+# on a second server later, built with auth in its constructor. The registry is
+# what carries the descriptions across: a description is the only thing an
+# assistant has to pick a tool by, and re-registering without them would leave
+# seventeen nameless verbs.
+_TOOLS: "list[tuple]" = []
+
+
+def tool(**how):
+    """Declare a tool, and remember how it was declared."""
+    def register(fn):
+        _TOOLS.append((fn, how))
+        return fn
+    return register
+
+
+def _build(**kw):
+    """A server with this package's tools on it, and whatever `kw` says.
+
+    Auth belongs in `kw`: `token_verifier` and `auth` are constructor
+    arguments, and passing them here is what keeps this file off the SDK's
+    private attributes.
+    """
+    srv = MCPServer(NAME, instructions=INSTRUCTIONS, **kw)
+    for fn, how in _TOOLS:
+        srv.add_tool(fn, **how)
+    return srv
 
 
 class _Shared(MeshArc):
@@ -243,7 +271,7 @@ def _safe(fn):
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-@server.tool(description="Scrape a list of URLs (up to 500) into markdown, no project needed. Waits for the batch. "
+@tool(description="Scrape a list of URLs (up to 500) into markdown, no project needed. Waits for the batch. "
                          "One URL is answered in the same request where the page is quick. PDFs, Word files and "
                          "spreadsheets are read as text unless parse_documents is false. "
                          "`config` is any subset of a project config, e.g. {\"formats\": [\"markdown\", \"text\"], \"concurrency\": 4, \"render_js\": \"always\"}.")
@@ -274,7 +302,7 @@ def scrape_urls(urls: list[str], config: dict | None = None, formats: str = "mar
     return _safe(go)
 
 
-@server.tool(description="Extract one URL with every format a project can produce (markdown, text, cleanHtml, "
+@tool(description="Extract one URL with every format a project can produce (markdown, text, cleanHtml, "
                          "json fields, screenshot), through the fetch ladder: plain http first, a browser only "
                          "when needed or when render_js is 'always'. Browser `actions` (click, type, select, press, "
                          "wait, scroll; a click with repeat 'until_gone' for Load-more buttons; `each` to click "
@@ -290,7 +318,7 @@ def extract_url(url: str, config: dict | None = None, parse_documents: bool = Tr
     return _safe(go)
 
 
-@server.tool(description="Every URL a site declares in its sitemaps -- robots.txt, the well-known paths, and every "
+@tool(description="Every URL a site declares in its sitemaps -- robots.txt, the well-known paths, and every "
                          "index file walked to its children -- without fetching any of the pages. Cheap, and the right "
                          "first step before crawling: it says how big a site is and what sections it has. `search` "
                          "narrows to URLs containing a string.")
@@ -304,7 +332,7 @@ def map_site(url: str, search: str | None = None, limit: int = 1000) -> dict:
     return _safe(go)
 
 
-@server.tool(description="Crawl a whole site once and return its pages -- no project needed. Follows links from the "
+@tool(description="Crawl a whole site once and return its pages -- no project needed. Follows links from the "
                          "URL given, reads the sitemap, and stops at `limit` pages. Returns when the crawl finishes "
                          "(minutes for a large limit); the pages come back with markdown, capped per page. "
                          "`include_paths` and `exclude_paths` are globs over the URL path -- '/blog/*' for a section, "
@@ -340,7 +368,7 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
     return _safe(go)
 
 
-@server.tool(description="Keep a crawl from crawl_site as a project, so the site is watched over time and its changes "
+@tool(description="Keep a crawl from crawl_site as a project, so the site is watched over time and its changes "
                          "are recorded. Nothing is re-fetched: the crawl's pages become the project's first run. "
                          "schedule: manual | hourly | daily | weekly.")
 def keep_crawl_as_project(crawl_id: str, name: str | None = None, schedule: str = "manual") -> dict:
@@ -350,7 +378,7 @@ def keep_crawl_as_project(crawl_id: str, name: str | None = None, schedule: str 
     return _safe(go)
 
 
-@server.tool(description="The workspace's projects: sites watched over time, with their last run's counts.")
+@tool(description="The workspace's projects: sites watched over time, with their last run's counts.")
 def list_projects() -> list | dict:
     return _safe(lambda: [{k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "pages", "coverage", "lastRun", "health")}
                           for p in _client().projects.list()])
@@ -403,7 +431,7 @@ CONFIG_GUIDE = {
 }
 
 
-@server.tool(description="Every project setting an assistant can set: name, meaning, and the default. Read this "
+@tool(description="Every project setting an assistant can set: name, meaning, and the default. Read this "
                          "before create_project or update_project when the request names a section, a schedule, "
                          "a format, a limit or a behaviour -- the keys are exact, guessed names are refused.")
 def describe_project_config() -> dict:
@@ -419,12 +447,12 @@ def describe_project_config() -> dict:
     return _safe(go)
 
 
-@server.tool(description="One project with its settings, schedule and last run -- read it before changing it.")
+@tool(description="One project with its settings, schedule and last run -- read it before changing it.")
 def get_project(project_id: str) -> dict:
     return _safe(lambda: _client().projects.get(project_id))
 
 
-@server.tool(description="Create a project for a site (seed URL) so it is crawled on a schedule and its changes recorded. "
+@tool(description="Create a project for a site (seed URL) so it is crawled on a schedule and its changes recorded. "
                          "`config` is any subset of the settings describe_project_config lists -- for one section of "
                          "a site pass include_paths (globs), e.g. {\"include_paths\": [\"/blog/*\"]}; map_site first "
                          "shows how the site is laid out. schedule: manual | hourly | daily | weekly.")
@@ -432,7 +460,7 @@ def create_project(seed: str, name: str | None = None, schedule: str = "manual",
     return _safe(lambda: _client().projects.create(seed, name=name, schedule=schedule, config=config))
 
 
-@server.tool(description="Change a project: its name, schedule, or any settings in `config` (only the keys given "
+@tool(description="Change a project: its name, schedule, or any settings in `config` (only the keys given "
                          "change; the rest stay). The next run uses the new settings.")
 def update_project(project_id: str, name: str | None = None, schedule: str | None = None, config: dict | None = None) -> dict:
     def go():
@@ -450,7 +478,7 @@ def update_project(project_id: str, name: str | None = None, schedule: str | Non
     return _safe(go)
 
 
-@server.tool(description="Start a crawl of a project now. With wait=true, returns the finished run; hosted, a run "
+@tool(description="Start a crawl of a project now. With wait=true, returns the finished run; hosted, a run "
                          "still going after a few seconds comes back as a job to follow with get_job.")
 def start_run(project_id: str, wait: bool = False) -> dict:
     def go():
@@ -466,7 +494,7 @@ def start_run(project_id: str, wait: bool = False) -> dict:
     return _safe(go)
 
 
-@server.tool(description="The pages of a project's last finished run (or run_id): url, status, depth, words, when changed.")
+@tool(description="The pages of a project's last finished run (or run_id): url, status, depth, words, when changed.")
 def list_pages(project_id: str, run_id: str | None = None) -> dict:
     def go():
         r = _client().pages(project_id, run_id)
@@ -475,12 +503,12 @@ def list_pages(project_id: str, run_id: str | None = None) -> dict:
     return _safe(go)
 
 
-@server.tool(description="One stored page in full: markdown, head fields, fields, and its versions across runs.")
+@tool(description="One stored page in full: markdown, head fields, fields, and its versions across runs.")
 def get_page(project_id: str, url: str, run_id: str | None = None) -> dict:
     return _safe(lambda: _trim_page(_client().page(project_id, url, run_id)))
 
 
-@server.tool(description="What changed in a project's last run against the run before it: pages added, modified, "
+@tool(description="What changed in a project's last run against the run before it: pages added, modified, "
                          "removed (withheld when the crawl reached under 90% of the site), and head-field changes.")
 def get_changes(project_id: str, run_id: str | None = None) -> dict:
     def go():
@@ -493,18 +521,18 @@ def get_changes(project_id: str, run_id: str | None = None) -> dict:
     return _safe(go)
 
 
-@server.tool(description="Search inside a project's run. mode 'content': every word must appear, \"quoted phrases\" as written, "
+@tool(description="Search inside a project's run. mode 'content': every word must appear, \"quoted phrases\" as written, "
                          "over the extracted markdown. mode 'selector': a CSS selector or XPath (starting with / or () over the stored html.")
 def search_pages(project_id: str, q: str, mode: str = "content", run_id: str | None = None) -> dict:
     return _safe(lambda: _client().search(project_id, q, mode=mode, run_id=run_id))
 
 
-@server.tool(description="Fetch listed pages of a project again now, as a run of their own compared against the last full run.")
+@tool(description="Fetch listed pages of a project again now, as a run of their own compared against the last full run.")
 def recrawl_pages(project_id: str, urls: list[str]) -> dict:
     return _safe(lambda: _client().recrawl(project_id, urls))
 
 
-@server.tool(description="Follow a job a long tool handed back: a crawl from crawl_site, a run from start_run, or a "
+@tool(description="Follow a job a long tool handed back: a crawl from crawl_site, a run from start_run, or a "
                          "batch from scrape_urls. Returns its status and counts, and once it has finished, the same "
                          "result the original tool would have given. kind: crawl | run | batch. A run needs its "
                          "project_id. Costs nothing.")
@@ -536,6 +564,11 @@ def get_job(kind: str, id: str, project_id: str | None = None) -> dict:
             return _batch_result(s.batch(id))
         return {"error": f"kind must be crawl, run or batch, not {kind!r}", "code": "validation"}
     return _safe(go)
+
+
+# Stdio's server, built now that the seventeen are declared. Hosted mode
+# builds its own in `authorize`, because auth is set in the constructor.
+server = _build()
 
 
 class _IntrospectionVerifier:
@@ -660,47 +693,38 @@ def _transport_security(public_url):
 
 
 def authorize(issuer, public, secret):
-    """Attach OAuth to the server the tools were registered on, and hand back
-    the verifier so its secret can be probed before anything is served.
+    """The hosted server: the same seventeen tools, with OAuth attached.
 
-    Its own function rather than a stretch of main() so a test can stand the
-    whole thing up -- app, auth middleware, verifier and tools together -- and
-    send real HTTP at it. Every piece here passed in isolation while the
-    assembled server could still have refused every request.
+    A server of its own rather than the stdio one with auth bolted on after
+    the fact. `token_verifier` and `auth` are constructor arguments, and
+    setting them afterwards means writing to a private attribute -- which
+    works, and silently does nothing the day it is renamed. What it would do
+    is leave the app with no auth middleware at all, serving every request
+    that carries no token. Passing them to the constructor cannot fail that
+    way: it validates the pair, and refuses one without the other.
+
+    The module's `server` is rebound so there is one answer to which server is
+    serving, and the verifier comes back so its secret can be probed before
+    anything is served.
     """
+    global server
     from mcp.server.auth.settings import AuthSettings
 
-    # The tools are registered on `server` at import, so auth is attached to
-    # that instance rather than a second one being built around it. These are
-    # the two things the app reads when it is built: MCPServer.streamable_http_app
-    # (mcpserver/server.py:1279-1310 in mcp 2.2.0) hands `self.settings.auth` and
-    # `self._token_verifier` down to the lowlevel app, which turns them into the
-    # auth middleware and the resource-metadata route. The constructor takes the
-    # same pair publicly and refuses one without the other, which is why they are
-    # set together here.
-    #
-    # `_token_verifier` is private, and the public constructor argument is not
-    # reachable from here: the tools are bound to this instance by decorators at
-    # import, before the mode is known, and there is no public accessor that
-    # hands them to a second instance. Two things guard it. The dependency is
-    # pinned below mcp 3, and if the attribute is ever renamed the server loses
-    # its auth middleware and starts answering requests that carry no token at
-    # all -- which is what test_a_request_with_no_token_is_refused_and_says_where_
-    # to_get_one asserts. That test failing is the signal; it is not cosmetic.
-    #
     # Pydantic URL types, not strings: AuthSettings declares AnyHttpUrl, and a
     # bad value should be refused here rather than at the first request.
     from pydantic import AnyHttpUrl
     verifier = _IntrospectionVerifier(issuer, public, secret)
-    server.settings.auth = AuthSettings(
-        issuer_url=AnyHttpUrl(issuer),
-        resource_server_url=AnyHttpUrl(public),
-        required_scopes=["read"],
-        # Explicit in 2.x, the default in 3.0. Without it, a token minted for
-        # another resource would be accepted here.
-        validate_token_resource=True,
+    server = _build(
+        token_verifier=verifier,
+        auth=AuthSettings(
+            issuer_url=AnyHttpUrl(issuer),
+            resource_server_url=AnyHttpUrl(public),
+            required_scopes=["read"],
+            # Explicit in 2.x, the default in 3.0. Without it, a token minted
+            # for another resource would be accepted here.
+            validate_token_resource=True,
+        ),
     )
-    server._token_verifier = verifier
     return verifier
 
 

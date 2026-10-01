@@ -10,7 +10,6 @@ variable on its own, so it is not enough for `_client()` to avoid naming it:
 it has to refuse to build a client at all without a caller's token.
 """
 import json
-import os
 
 import pytest
 
@@ -238,10 +237,16 @@ def test_an_unreachable_issuer_stops_the_server(monkeypatch):
 
 
 def test_get_job_is_offered_alongside_the_rest():
-    source = (os.path.dirname(mcp_mod.__file__) + os.sep + "mcp.py")
-    text = open(source, encoding="utf-8").read()
-    assert text.count("@server.tool") == 17, "sixteen verbs plus get_job"
-    assert "def get_job(" in text
+    """Seventeen declared, and seventeen on the server that was built from
+    them. Counting `@server.tool` in the source said nothing about what the
+    server ended up carrying."""
+    import anyio
+
+    assert len(mcp_mod._TOOLS) == 17, "sixteen verbs plus get_job"
+    served = [t.name for t in anyio.run(mcp_mod.server.list_tools)]
+    assert len(served) == 17
+    assert "get_job" in served
+    assert callable(mcp_mod.get_job)
 
 
 def test_a_finished_crawl_is_finished_however_it_finished():
@@ -330,13 +335,13 @@ class _Stub:
 def served(monkeypatch):
     """The deployed server, with introspection answered in-process.
 
-    `authorize` writes to the module-level server, which the tools are
-    registered on; the settings are put back afterwards so the rest of this
-    file still sees an unauthenticated one.
+    `authorize` builds a second server with auth in its constructor and
+    rebinds the module's `server` to it; the stdio one is put back afterwards
+    so the rest of this file still sees a server with no auth on it.
     """
     from starlette.testclient import TestClient
 
-    was = (mcp_mod.server.settings.auth, mcp_mod.server._token_verifier)
+    was = mcp_mod.server
     _Stub.made = []
     monkeypatch.setattr(mcp_mod, "_Shared", _Stub)
     verifier = mcp_mod.authorize(ISSUER, RESOURCE, "s3cret")
@@ -354,7 +359,7 @@ def served(monkeypatch):
         with TestClient(app, base_url="http://mcp.example.test") as client:
             yield client
     finally:
-        mcp_mod.server.settings.auth, mcp_mod.server._token_verifier = was
+        mcp_mod.server = was
 
 
 def _rpc(client, method, params=None, token=TOKEN, session=None, notify=False):
@@ -428,3 +433,24 @@ def test_the_server_answers_a_real_call_as_the_caller_who_sent_it(served):
     assert out["result"].get("isError") is not True, out
     assert "Watched site" in json.dumps(out["result"])
     assert _Stub.made == [TOKEN], "the call has to act as its caller, never as the operator"
+
+
+def test_auth_is_attached_through_the_constructor(served):
+    """Not by writing to a private attribute afterwards.
+
+    `MCPServer` takes `token_verifier` and `auth` as constructor arguments and
+    validates the pair. Setting them after the fact works today and would
+    silently stop working the day the attribute is renamed -- and what it
+    would leave behind is a server with no auth middleware, serving requests
+    that carry no token at all. So the wiring is checked here as well as in
+    the 401 above.
+    """
+    assert mcp_mod.server.settings.auth is not None
+    assert str(mcp_mod.server.settings.auth.resource_server_url).rstrip("/") == RESOURCE.rstrip("/")
+    assert mcp_mod.server.settings.auth.validate_token_resource is True
+
+    # Both servers carry the same seventeen tools, declared once.
+    assert len(mcp_mod._TOOLS) == 17
+    names = {fn.__name__ for fn, _how in mcp_mod._TOOLS}
+    assert "get_job" in names
+    assert all(how.get("description") for _fn, how in mcp_mod._TOOLS),         "a tool with no description is a verb an assistant cannot choose"
