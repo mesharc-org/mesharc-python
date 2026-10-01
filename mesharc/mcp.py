@@ -37,6 +37,7 @@ import os
 import time
 import uuid
 from collections import OrderedDict
+from itertools import islice
 
 try:
     from mcp.server.mcpserver import MCPServer
@@ -44,6 +45,9 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit('The MCP server needs the "mcp" package: pip install "mesharc[mcp]"') from exc
 
 from mesharc import MeshArc, MeshArcError, MeshArcTimeoutError
+# The one place that decides whether a job is still going. Listing terminal
+# names here instead meant `error` was missed and failed crawls polled for ever.
+from mesharc import _running
 
 MARKDOWN_CAP = 12_000
 PAGES_CAP = 50
@@ -323,9 +327,11 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
             # hosted mode gives it a budget and hands back the job id instead.
             budget = _budget()
             if budget is None:
-                return _crawl_result(job, job.pages(limit=50))
+                return _crawl_result(job, islice(job.pages(limit=PAGES_CAP), PAGES_CAP))
             try:
-                pages = list(job.pages(limit=50, timeout=budget))
+                # islice, not list: `pages()` walks the whole crawl, and only
+                # PAGES_CAP of it is ever returned.
+                pages = list(islice(job.pages(limit=PAGES_CAP, timeout=budget), PAGES_CAP))
             except MeshArcTimeoutError:
                 # The budget, not a failure: the crawl is still going, and
                 # `pages()` says so by raising once its deadline passes.
@@ -514,15 +520,16 @@ def get_job(kind: str, id: str, project_id: str | None = None) -> dict:
         s = _client()
         if kind == "crawl":
             job = s.get_crawl(id)
-            status = job.envelope.get("status") or ""
-            if status in ("done", "complete", "failed", "cancelled"):
-                return _crawl_result(job, job.pages(limit=50, wait=False))
-            return _still_running("crawl", id, job.envelope.get("counts"))
+            if _running(job.envelope.get("status")):
+                return _still_running("crawl", id, job.envelope.get("counts"))
+            # Finished, however it finished -- `error` and `cancelled` included.
+            # An assistant has to be told a crawl failed, not kept polling.
+            return _crawl_result(job, islice(job.pages(limit=PAGES_CAP, wait=False), PAGES_CAP))
         if kind == "run":
             if not project_id:
                 return {"error": "a run needs its project_id", "code": "validation"}
             run = s.runs.get(project_id, id)
-            if run.get("status") == "running" or run.get("queued"):
+            if _running(run.get("status")) or run.get("queued"):
                 return _still_running("run", id, run.get("counts"), project_id=project_id)
             return run
         if kind == "batch":
@@ -551,10 +558,18 @@ class _IntrospectionVerifier:
         self._cache_s = cache_s
         self._cache: "dict[str, tuple[float, object]]" = {}
 
-    def _ask(self, token):
+    async def _ask(self, token):
+        """Introspect, without stopping the server while it happens.
+
+        `verify_token` runs on the event loop, so a blocking call here held
+        every other request for up to the timeout on each token it had not
+        seen -- one slow introspection stalling everybody. An async client
+        waits on the socket and lets the loop get on with the rest.
+        """
         import httpx
-        r = httpx.post(self._url, data={"token": token},
-                       headers={"X-Introspect-Secret": self._secret}, timeout=3.0)
+        async with httpx.AsyncClient(timeout=3.0) as http:
+            r = await http.post(self._url, data={"token": token},
+                                headers={"X-Introspect-Secret": self._secret})
         r.raise_for_status()
         return r.json()
 
@@ -566,7 +581,7 @@ class _IntrospectionVerifier:
         if hit and hit[0] > now:
             return hit[1]
         try:
-            body = self._ask(token)
+            body = await self._ask(token)
         except Exception:                                  # noqa: BLE001 -- fail closed, whatever broke
             return None
         if not isinstance(body, dict) or not body.get("active"):

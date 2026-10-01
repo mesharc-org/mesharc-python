@@ -26,6 +26,13 @@ class _User(AuthenticatedUser):
         self.access_token = at
 
 
+def _answers(body):
+    """An async stub for the verifier's introspection call."""
+    async def _ask(_token):
+        return body
+    return _ask
+
+
 def _as(token, grant="g1", scopes=("read",)):
     at = AccessToken(token=token, client_id=grant, scopes=list(scopes),
                      resource=RESOURCE, claims={"grant": grant, "org": "o1"})
@@ -140,12 +147,14 @@ def test_the_verifier_fails_closed(monkeypatch):
     v = mcp_mod._IntrospectionVerifier("http://api.test", RESOURCE, "s3cret")
 
     for boom in (TimeoutError("slow"), ValueError("not json"), RuntimeError("500")):
-        monkeypatch.setattr(v, "_ask", lambda _t, e=boom: (_ for _ in ()).throw(e))
+        async def raises(_t, e=boom):
+            raise e
+        monkeypatch.setattr(v, "_ask", raises)
         assert anyio.run(v.verify_token, "mesharc_oat_x") is None
 
-    monkeypatch.setattr(v, "_ask", lambda _t: {"active": False})
+    monkeypatch.setattr(v, "_ask", _answers({"active": False}))
     assert anyio.run(v.verify_token, "mesharc_oat_x") is None
-    monkeypatch.setattr(v, "_ask", lambda _t: "a string, not a body")
+    monkeypatch.setattr(v, "_ask", _answers("a string, not a body"))
     assert anyio.run(v.verify_token, "mesharc_oat_x") is None
 
 
@@ -153,9 +162,9 @@ def test_an_active_token_carries_its_grant_and_audience(monkeypatch):
     import anyio
 
     v = mcp_mod._IntrospectionVerifier("http://api.test", RESOURCE, "s3cret")
-    monkeypatch.setattr(v, "_ask", lambda _t: {
+    monkeypatch.setattr(v, "_ask", _answers({
         "active": True, "scope": "read write", "client_id": "grant-9",
-        "org": "org-9", "exp": 4000000000, "aud": RESOURCE})
+        "org": "org-9", "exp": 4000000000, "aud": RESOURCE}))
     at = anyio.run(v.verify_token, "mesharc_oat_x")
     assert at.scopes == ["read", "write"]
     assert at.resource == RESOURCE, "the SDK compares this against the public url"
@@ -168,7 +177,7 @@ def test_the_verifier_caches_a_live_answer_only(monkeypatch):
     v = mcp_mod._IntrospectionVerifier("http://api.test", RESOURCE, "s3cret")
     calls = []
 
-    def ask(_t):
+    async def ask(_t):
         calls.append(1)
         return {"active": True, "scope": "read", "client_id": "g", "exp": 4000000000, "aud": RESOURCE}
 
@@ -177,11 +186,18 @@ def test_the_verifier_caches_a_live_answer_only(monkeypatch):
     anyio.run(v.verify_token, "mesharc_oat_x")
     assert len(calls) == 1, "a cold call costs one hop; a warm one costs none"
 
-    calls.clear()
-    monkeypatch.setattr(v, "_ask", lambda _t: {"active": False})
+    # An inactive answer must not be cached, or revoking a token would be
+    # undone for a minute by the first caller who tried it while it was live.
+    refusals = []
+
+    async def refuse(_t):
+        refusals.append(1)
+        return {"active": False}
+
+    monkeypatch.setattr(v, "_ask", refuse)
     anyio.run(v.verify_token, "mesharc_oat_never_seen")
     anyio.run(v.verify_token, "mesharc_oat_never_seen")
-    assert len(calls) == 0 and True, "an inactive answer is not cached"
+    assert len(refusals) == 2, "every refusal is asked again, never served from the cache"
 
 
 def test_http_mode_needs_its_environment(monkeypatch):
@@ -225,3 +241,39 @@ def test_get_job_is_offered_alongside_the_rest():
     text = open(source, encoding="utf-8").read()
     assert text.count("@server.tool") == 17, "sixteen verbs plus get_job"
     assert "def get_job(" in text
+
+
+def test_a_finished_crawl_is_finished_however_it_finished():
+    """The API sends `error`, which an allow-list of terminal names missed --
+    so a failed crawl was reported as still running and polled for ever."""
+    from mesharc import _running
+    for status in ("done", "complete", "failed", "cancelled", "error", "stopped", "whatever-is-added-next"):
+        assert not _running(status), f"{status} is not a job still going"
+    for status in ("queued", "running"):
+        assert _running(status)
+
+
+def test_only_the_cap_is_ever_fetched():
+    """`pages()` walks the whole crawl in batches. Materialising it and slicing
+    afterwards fetched every page to keep fifty."""
+    from itertools import islice
+
+    asked = []
+
+    def pages(limit=25, **_kw):
+        for i in range(10_000):
+            asked.append(i)
+            yield {"url": f"https://x.test/{i}"}
+
+    kept = list(islice(pages(limit=mcp_mod.PAGES_CAP), mcp_mod.PAGES_CAP))
+    assert len(kept) == mcp_mod.PAGES_CAP
+    assert len(asked) == mcp_mod.PAGES_CAP, "a page not returned should not have been fetched"
+
+
+def test_the_introspection_call_does_not_block_the_loop():
+    """verify_token runs on the event loop. A blocking client there held every
+    other request for the timeout on each token it had not seen."""
+    import inspect
+
+    v = mcp_mod._IntrospectionVerifier("http://api.test", RESOURCE, "s")
+    assert inspect.iscoroutinefunction(v._ask), "introspection has to be awaited, not blocked on"
