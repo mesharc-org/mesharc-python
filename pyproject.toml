@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mesharc"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python client for the MeshArc API: a URL in, clean content out, and a record of what changed."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=2.0"]
+mcp = ["mcp>=2.2,<3"]
 dev = ["pytest>=8", "build", "twine", "ruff>=0.16", "mypy>=1.18"]
 
 [project.scripts]

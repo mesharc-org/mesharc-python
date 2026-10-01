@@ -224,6 +224,17 @@ Every response says what it cost: `credits` on a page, `creditsUsed` on a job en
 
 The package also ships MeshArc as an MCP server, so Claude Desktop, Claude Code, Cursor and any MCP client can scrape, crawl, map and read change records as tools. Python 3.10+.
 
+There is a hosted one, so most people need install nothing:
+
+```bash
+# Claude Code
+claude mcp add --transport http mesharc https://mcp.mesharc.dev/mcp
+```
+
+It opens a browser once to sign in to mesharc.dev and approve, then works. Approving issues the app an API key of its own, which you can see and revoke under Settings → API keys; read only unless you allow changes. Any client that takes a remote MCP URL — the Claude.ai and ChatGPT connectors, Claude mobile, Cursor — takes it the same way.
+
+Or run it yourself, over stdio, with your own key:
+
 ```bash
 pip install "mesharc[mcp]"
 MESHARC_API_KEY=mesharc_... mesharc-mcp          # serves over stdio
@@ -232,11 +243,23 @@ MESHARC_API_KEY=mesharc_... mesharc-mcp          # serves over stdio
 claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 ```
 
-Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_project`, `list_projects`, `describe_project_config`, `get_project`, `create_project`, `update_project`, `start_run`, `list_pages`, `get_page`, `get_changes`, `search_pages`, `recrawl_pages`. Every tool is a call through this client, trimmed where a body would swamp a context window (markdown is capped per page; ask for one page to get all of it).
+Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_project`, `list_projects`, `describe_project_config`, `get_project`, `create_project`, `update_project`, `start_run`, `list_pages`, `get_page`, `get_changes`, `search_pages`, `recrawl_pages`, `get_job`. Every tool is a call through this client, trimmed where a body would swamp a context window (markdown is capped per page; ask for one page to get all of it).
+
+Hosted, a tool that would hold a connection open for minutes — a crawl, a run you asked to wait for, a multi-URL scrape — hands back a job after `MESHARC_MCP_WAIT` seconds (25 by default, because many MCP hosts time a tool call out sooner). The work carries on server-side and `get_job` picks it up. Run locally, those tools block as they always have.
+
+### Hosting it yourself
+
+```bash
+MESHARC_MCP_PUBLIC_URL=https://mcp.example.dev/mcp MESHARC_OAUTH_ISSUER=https://api.example.dev MESHARC_INTROSPECT_SECRET=...                      mesharc-mcp --http --host 127.0.0.1 --port 8040
+```
+
+The server holds no key. Each request carries the caller's OAuth token, verified against `MESHARC_OAUTH_ISSUER` and then used to make the call, so one process serves many workspaces. `MESHARC_API_KEY` is never read in this mode; if it is set, startup says it is being ignored.
+
+Behind a reverse proxy, note that binding `127.0.0.1` makes the MCP SDK enable DNS-rebinding protection with a localhost-only `Host` allow-list. The server therefore passes its own, built from `MESHARC_MCP_PUBLIC_URL` — without which every proxied request would be refused. Add browser-based clients to the `Origin` allow-list with `MESHARC_MCP_ALLOWED_ORIGINS` (comma-separated).
 
 ## Privacy and security
 
-The client talks to one host — the API base URL, `https://api.mesharc.dev` unless `MESHARC_API_URL` or `base_url=` says otherwise — and to nothing else. The key travels only as a bearer header, only over HTTPS. Nothing is written to disk, no telemetry is sent, and the only environment variables read are `MESHARC_API_KEY` and `MESHARC_API_URL`.
+The client talks to one host — the API base URL, `https://api.mesharc.dev` unless `MESHARC_API_URL` or `base_url=` says otherwise — and to nothing else. The key travels only as a bearer header, only over HTTPS. Nothing is written to disk and no telemetry is sent. The client reads only `MESHARC_API_KEY` and `MESHARC_API_URL`; the MCP server in HTTP mode reads `MESHARC_MCP_PUBLIC_URL`, `MESHARC_OAUTH_ISSUER`, `MESHARC_INTROSPECT_SECRET`, `MESHARC_MCP_WAIT` and `MESHARC_MCP_ALLOWED_ORIGINS`, and no key of its own.
 
 What MeshArc keeps about you and about the pages you crawl, and for how long, is in the [privacy policy](https://mesharc.dev/legal/privacy). How the service is secured is on the [security page](https://mesharc.dev/legal/security). To report a vulnerability in this client or in the service, write to security@mesharc.dev rather than opening a public issue — see [SECURITY.md](https://github.com/mesharc-org/mesharc-python/blob/main/SECURITY.md).
 
