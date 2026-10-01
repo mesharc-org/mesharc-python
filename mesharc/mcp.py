@@ -672,9 +672,22 @@ def authorize(issuer, public, secret):
 
     # The tools are registered on `server` at import, so auth is attached to
     # that instance rather than a second one being built around it. These are
-    # the two things the streamable-http app reads (mcpserver.server:246-255):
-    # the constructor would only have set the same pair, and it refuses one
-    # without the other, so they are set together here too.
+    # the two things the app reads when it is built: MCPServer.streamable_http_app
+    # (mcpserver/server.py:1279-1310 in mcp 2.2.0) hands `self.settings.auth` and
+    # `self._token_verifier` down to the lowlevel app, which turns them into the
+    # auth middleware and the resource-metadata route. The constructor takes the
+    # same pair publicly and refuses one without the other, which is why they are
+    # set together here.
+    #
+    # `_token_verifier` is private, and the public constructor argument is not
+    # reachable from here: the tools are bound to this instance by decorators at
+    # import, before the mode is known, and there is no public accessor that
+    # hands them to a second instance. Two things guard it. The dependency is
+    # pinned below mcp 3, and if the attribute is ever renamed the server loses
+    # its auth middleware and starts answering requests that carry no token at
+    # all -- which is what test_a_request_with_no_token_is_refused_and_says_where_
+    # to_get_one asserts. That test failing is the signal; it is not cosmetic.
+    #
     # Pydantic URL types, not strings: AuthSettings declares AnyHttpUrl, and a
     # bad value should be refused here rather than at the first request.
     from pydantic import AnyHttpUrl
