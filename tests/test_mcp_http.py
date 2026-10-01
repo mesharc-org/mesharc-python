@@ -9,6 +9,7 @@ pages and spending their credits. `MeshArc.__init__` falls back to that
 variable on its own, so it is not enough for `_client()` to avoid naming it:
 it has to refuse to build a client at all without a caller's token.
 """
+import json
 import os
 
 import pytest
@@ -296,3 +297,134 @@ def test_a_token_with_no_audience_is_refused(monkeypatch):
     at = anyio.run(v.verify_token, "mesharc_oat_y")
     assert at is not None and at.resource == "https://somewhere-else.test/mcp", (
         "another resource's audience is carried through for the SDK to reject, not rewritten")
+
+
+# --- the whole thing, over HTTP ------------------------------------------
+#
+# Everything above tests a piece. This part stands the server up as it is
+# deployed -- app, auth middleware, verifier, session manager and tools -- and
+# sends real HTTP at it. Each piece passed on its own while the assembled
+# server could still refuse every request or, worse, serve one without a
+# token: `_client()` is only unreachable without a credential if the transport
+# in front of it never lets an unauthenticated request get that far.
+
+ISSUER = "http://api.example.test"
+TOKEN = "mesharc_oat_caller-one"
+
+
+class _Stub:
+    """A client that records whose token built it, instead of calling an API."""
+    made: list = []
+
+    def __init__(self, token, base_url=None):
+        self.token = token
+        _Stub.made.append(token)
+        self.projects = self
+
+    def list(self):
+        return [{"id": "p1", "name": "Watched site", "seed": "https://a.test", "host": "a.test",
+                 "schedule": "manual", "pages": 3, "coverage": 100, "lastRun": None, "health": "ok"}]
+
+
+@pytest.fixture
+def served(monkeypatch):
+    """The deployed server, with introspection answered in-process.
+
+    `authorize` writes to the module-level server, which the tools are
+    registered on; the settings are put back afterwards so the rest of this
+    file still sees an unauthenticated one.
+    """
+    from starlette.testclient import TestClient
+
+    was = (mcp_mod.server.settings.auth, mcp_mod.server._token_verifier)
+    _Stub.made = []
+    monkeypatch.setattr(mcp_mod, "_Shared", _Stub)
+    verifier = mcp_mod.authorize(ISSUER, RESOURCE, "s3cret")
+
+    async def introspect(token):
+        if token != TOKEN:
+            return {"active": False}
+        return {"active": True, "scope": "read write", "client_id": "grant-1",
+                "org": "org-1", "exp": 4000000000, "aud": RESOURCE}
+
+    monkeypatch.setattr(verifier, "_ask", introspect)
+    app = mcp_mod.server.streamable_http_app(
+        streamable_http_path="/mcp", transport_security=mcp_mod._transport_security(RESOURCE))
+    try:
+        with TestClient(app, base_url="http://mcp.example.test") as client:
+            yield client
+    finally:
+        mcp_mod.server.settings.auth, mcp_mod.server._token_verifier = was
+
+
+def _rpc(client, method, params=None, token=TOKEN, session=None, notify=False):
+    """One JSON-RPC call over streamable HTTP. Answers arrive as SSE."""
+    body = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+    if not notify:
+        body["id"] = _rpc.n = getattr(_rpc, "n", 0) + 1
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json",
+               "MCP-Protocol-Version": "2025-06-18"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    if session:
+        headers["mcp-session-id"] = session
+    r = client.post("/mcp", json=body, headers=headers)
+    if r.status_code >= 300 or not r.text:
+        return r, None
+    last = [ln[5:].strip() for ln in r.text.splitlines() if ln.startswith("data:")]
+    import json as _json
+    return r, (_json.loads(last[-1]) if last else _json.loads(r.text))
+
+
+def _session(client):
+    r, answer = _rpc(client, "initialize", {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "selftest", "version": "0"}})
+    assert r.status_code == 200, r.text
+    sid = r.headers.get("mcp-session-id")
+    _rpc(client, "notifications/initialized", session=sid, notify=True)
+    return sid, answer
+
+
+def test_a_request_with_no_token_is_refused_and_says_where_to_get_one(served):
+    """401 with a WWW-Authenticate that names the resource metadata -- that
+    header is how an MCP client discovers the authorization server and starts
+    the flow. Without it the client has nothing to go on and just fails."""
+    r, _ = _rpc(served, "tools/list", token=None)
+    assert r.status_code == 401
+    assert "resource_metadata" in r.headers.get("www-authenticate", "")
+    assert not _Stub.made, "no credential must mean no client was ever built"
+
+
+def test_a_token_the_api_does_not_know_gets_nowhere(served):
+    r, _ = _rpc(served, "tools/list", token="mesharc_oat_not-ours")
+    assert r.status_code == 401
+    assert not _Stub.made
+
+
+def test_the_resource_metadata_points_at_the_api(served):
+    r = served.get("/.well-known/oauth-protected-resource/mcp")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["resource"].rstrip("/") == RESOURCE.rstrip("/")
+    assert ISSUER in [a.rstrip("/") for a in body["authorization_servers"]]
+
+
+def test_the_server_answers_a_real_call_as_the_caller_who_sent_it(served):
+    """The end-to-end one: a token in, a tool run, and the client it ran with
+    built from that same token."""
+    sid, hello = _session(served)
+    assert hello["result"]["serverInfo"]["name"]
+
+    r, listed = _rpc(served, "tools/list", session=sid)
+    assert r.status_code == 200, r.text
+    names = [t["name"] for t in listed["result"]["tools"]]
+    assert len(names) == 17, names
+    assert "get_job" in names
+
+    r, out = _rpc(served, "tools/call", {"name": "list_projects", "arguments": {}}, session=sid)
+    assert r.status_code == 200, r.text
+    assert out["result"].get("isError") is not True, out
+    assert "Watched site" in json.dumps(out["result"])
+    assert _Stub.made == [TOKEN], "the call has to act as its caller, never as the operator"

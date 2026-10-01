@@ -659,6 +659,38 @@ def _transport_security(public_url):
     )
 
 
+def authorize(issuer, public, secret):
+    """Attach OAuth to the server the tools were registered on, and hand back
+    the verifier so its secret can be probed before anything is served.
+
+    Its own function rather than a stretch of main() so a test can stand the
+    whole thing up -- app, auth middleware, verifier and tools together -- and
+    send real HTTP at it. Every piece here passed in isolation while the
+    assembled server could still have refused every request.
+    """
+    from mcp.server.auth.settings import AuthSettings
+
+    # The tools are registered on `server` at import, so auth is attached to
+    # that instance rather than a second one being built around it. These are
+    # the two things the streamable-http app reads (mcpserver.server:246-255):
+    # the constructor would only have set the same pair, and it refuses one
+    # without the other, so they are set together here too.
+    # Pydantic URL types, not strings: AuthSettings declares AnyHttpUrl, and a
+    # bad value should be refused here rather than at the first request.
+    from pydantic import AnyHttpUrl
+    verifier = _IntrospectionVerifier(issuer, public, secret)
+    server.settings.auth = AuthSettings(
+        issuer_url=AnyHttpUrl(issuer),
+        resource_server_url=AnyHttpUrl(public),
+        required_scopes=["read"],
+        # Explicit in 2.x, the default in 3.0. Without it, a token minted for
+        # another resource would be accepted here.
+        validate_token_resource=True,
+    )
+    server._token_verifier = verifier
+    return verifier
+
+
 def main() -> None:
     """The `mesharc-mcp` command.
 
@@ -694,28 +726,9 @@ def main() -> None:
         print("  ! MESHARC_API_KEY is set and will be ignored: in http mode every "
               "request acts as the caller who sent it.", flush=True)
 
-    from mcp.server.auth.settings import AuthSettings
-    verifier = _IntrospectionVerifier(issuer, public, secret)
+    verifier = authorize(issuer, public, secret)
     _check_secret(verifier)
     _HTTP = True
-
-    # The tools registered on `server` at import, so auth is attached to that
-    # instance rather than a second one being built around it. These are the
-    # two things the streamable-http app reads (mcpserver.server:246-255): the
-    # constructor would only have set the same pair, and it refuses one without
-    # the other, so they are set together here too.
-    # Pydantic URL types, not strings: AuthSettings declares AnyHttpUrl, and a
-    # bad value should be refused here rather than at the first request.
-    from pydantic import AnyHttpUrl
-    server.settings.auth = AuthSettings(
-        issuer_url=AnyHttpUrl(issuer),
-        resource_server_url=AnyHttpUrl(public),
-        required_scopes=["read"],
-        # Explicit in 2.x, the default in 3.0. Without it, a token minted for
-        # another resource would be accepted here.
-        validate_token_resource=True,
-    )
-    server._token_verifier = verifier
 
     from urllib.parse import urlparse
     server.run("streamable-http", host=args.host, port=args.port,
