@@ -277,3 +277,22 @@ def test_the_introspection_call_does_not_block_the_loop():
 
     v = mcp_mod._IntrospectionVerifier("http://api.test", RESOURCE, "s")
     assert inspect.iscoroutinefunction(v._ask), "introspection has to be awaited, not blocked on"
+
+
+def test_a_token_with_no_audience_is_refused(monkeypatch):
+    """Substituting this server's own URL for a missing `aud` made the SDK
+    compare the value against itself, so the audience check -- the whole thing
+    stopping a token minted elsewhere being spent here -- always passed."""
+    import anyio
+
+    v = mcp_mod._IntrospectionVerifier("http://api.test", RESOURCE, "s3cret")
+    monkeypatch.setattr(v, "_ask", _answers({
+        "active": True, "scope": "read", "client_id": "g", "exp": 4000000000}))
+    assert anyio.run(v.verify_token, "mesharc_oat_x") is None
+
+    monkeypatch.setattr(v, "_ask", _answers({
+        "active": True, "scope": "read", "client_id": "g", "exp": 4000000000,
+        "aud": "https://somewhere-else.test/mcp"}))
+    at = anyio.run(v.verify_token, "mesharc_oat_y")
+    assert at is not None and at.resource == "https://somewhere-else.test/mcp", (
+        "another resource's audience is carried through for the SDK to reject, not rewritten")

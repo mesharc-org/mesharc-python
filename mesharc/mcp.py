@@ -587,12 +587,19 @@ class _IntrospectionVerifier:
         if not isinstance(body, dict) or not body.get("active"):
             return None
         scopes = [s for s in str(body.get("scope") or "").split() if s]
+        # A token with no audience is refused, not adopted. Substituting this
+        # server's own URL here made `validate_token_resource` compare the
+        # value against itself and pass every time -- which is the whole check
+        # that stops a token minted for somewhere else being spent here.
+        aud = body.get("aud")
+        if not aud:
+            return None
         at = AccessToken(
             token=token,
             client_id=str(body.get("client_id") or ""),
             scopes=scopes,
             expires_at=int(body["exp"]) if body.get("exp") else None,
-            resource=body.get("aud") or self._resource,
+            resource=aud,
             claims={"org": body.get("org"), "grant": body.get("client_id")},
         )
         # Only a live answer is cached, and never past the token's own expiry.
