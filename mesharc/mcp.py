@@ -364,11 +364,49 @@ def _scope():
 _SESSION = uuid.uuid4().hex[:8]
 
 
+def _scopes():
+    """What this caller was approved for, hosted. None locally, where the
+    server cannot know what the key behind it may do."""
+    if not _HTTP:
+        return None
+    from mcp.server.auth.middleware.auth_context import get_access_token
+    at = get_access_token()
+    return list(getattr(at, "scopes", None) or []) if at else []
+
+
+# Nine of the seventeen tools need write, including every one that fetches a
+# page: fetching spends the workspace's credits, so it is not a read however
+# it reads to an assistant asking for one URL. The API answers "this needs the
+# member role", which is true and tells an assistant nothing it can act on --
+# it does not know what a role is, that it has one, or that the person who
+# approved the connection chose it.
+READ_ONLY = (
+    "this connection was approved read-only. It can read what the workspace has "
+    "already stored -- projects, pages, change records, search, get_job -- but it "
+    "cannot fetch a new page or change anything, because fetching spends credits. "
+    "Ask the person to reconnect the app and tick write access."
+)
+
+
 def _safe(fn):
     try:
         return fn()
     except MeshArcError as exc:
-        return {"error": exc.detail, "status": exc.status}
+        out = {"error": exc.detail, "status": exc.status}
+        # A 403 carrying the status's own default code is the role check. The
+        # named ones -- suspended, email_unverified, mfa_required -- are other
+        # refusals and have to keep saying what they say.
+        #
+        # "no code at all" was the first version of this test, and it never
+        # fired: the API fills a code on every error (api/app.py _error_body),
+        # so a live read-only connection still heard about roles. Checked
+        # against the running API rather than reasoned about, which is the
+        # only reason it is right now.
+        scopes = _scopes()
+        if (exc.status == 403 and (exc.code or "") in ("", "forbidden")
+                and scopes is not None and "write" not in scopes):
+            out = {"error": READ_ONLY, "status": 403, "code": "read_only", "detail": exc.detail}
+        return out
     except Exception as exc:                          # noqa: BLE001
         return {"error": f"{type(exc).__name__}: {exc}"}
 
