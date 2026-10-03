@@ -6,6 +6,19 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.3.1 - 2026-10-03
+
+### Fixed
+
+- **A multi-page result is no longer unloadable.** A finished 200-page crawl came back as 2.2 million characters: every outbound link of every page was passed through untouched -- 1.19 MB of it, more than all the markdown put together -- and the 12,000-character body cap applied to each of the fifty pages returned. Clients refused to load it, and no context window would have held it. A crawl or multi-URL scrape now answers with an index of every page it found (`url`, `title`, `words`, `status`, up to 500 rows), an excerpt of the first fifty, and a link *count* in place of each link list. The whole answer is budgeted at 60,000 characters rather than each page at 12,000, so excerpts shrink as a crawl grows, with a floor of 600 characters each.
+- Single-page tools are unchanged and are how you read anything in full: `extract_url`, `get_page`, and `scrape_urls` with one URL still return the whole page at the 12,000-character cap.
+
+### Added
+
+- `get_job(kind, id, project_id=None, url=None, cursor=None)`. `url` returns one page of a crawl in full -- readable while the crawl is still running, because a page that has been crawled is stored -- and drops its link list. `cursor`, from the crawl result, returns the next window of pages.
+- `Crawl.page(url)` (`GET /crawl/{id}/page`), the API route behind that. The URL matches under either scheme and with or without a trailing slash. **This needs an API that has the route**: 0.3.1 requires the Seam-be deploy that added it.
+- `Crawl.pages(..., cursor=...)` resumes a page walk from where an earlier one stopped instead of starting at the top.
+
 ## 0.3.0 - 2026-09-30
 
 ### Added

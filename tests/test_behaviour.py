@@ -73,6 +73,25 @@ def test_a_next_link_hands_over_its_cursor():
     assert mesharc._cursor_of("/api/v1/crawl/x") == ""
 
 
+def test_one_page_of_a_crawl_is_asked_for_by_url():
+    arc, http = client([{"id": "c1", "status": "done"},
+                        {"url": "https://x.test/a", "markdown": "all of it"}])
+    crawl = arc.crawl("https://x.test/")
+    assert crawl.page("https://x.test/a")["markdown"] == "all of it"
+    assert http.calls[-1][:2] == ("GET", "/crawl/c1/page")
+    assert http.calls[-1][2] == {"url": "https://x.test/a"}
+
+
+def test_the_page_walk_can_start_from_a_cursor():
+    """A caller that read the first window asks for the rest from where it
+    stopped, rather than from the top."""
+    arc, http = client([{"id": "c1", "status": "done"},
+                        {"status": "done", "data": [{"url": "z"}], "cursor": "c9"}])
+    crawl = arc.crawl("https://x.test/")
+    assert [p["url"] for p in crawl.pages(cursor="c7")] == ["z"]
+    assert http.calls[-1][2]["cursor"] == "c7"
+
+
 def test_an_error_carries_its_code_and_request_id():
     err = MeshArcError(429, "too many", "rate_limited", "req_abc")
     assert (err.status, err.code, err.request_id) == (429, "rate_limited", "req_abc")

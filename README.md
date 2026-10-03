@@ -243,7 +243,9 @@ MESHARC_API_KEY=mesharc_... mesharc-mcp          # serves over stdio
 claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 ```
 
-Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_project`, `list_projects`, `describe_project_config`, `get_project`, `create_project`, `update_project`, `start_run`, `list_pages`, `get_page`, `get_changes`, `search_pages`, `recrawl_pages`, `get_job`. Every tool is a call through this client, trimmed where a body would swamp a context window (markdown is capped per page; ask for one page to get all of it).
+Tools: `scrape_urls`, `extract_url`, `map_site`, `crawl_site`, `keep_crawl_as_project`, `list_projects`, `describe_project_config`, `get_project`, `create_project`, `update_project`, `start_run`, `list_pages`, `get_page`, `get_changes`, `search_pages`, `recrawl_pages`, `get_job`. Every tool is a call through this client.
+
+A result with many pages in it is a map, not the territory: a crawl answers with an index of every page it found, an excerpt of the first fifty sharing a 60,000-character budget, and a count of each page's links rather than the links. Ask for the one page you want in full with `get_job(kind="crawl", id=…, url=…)`, or for the next window of pages with `cursor=`. One page asked for on its own -- `extract_url`, `get_page`, `scrape_urls` with a single url -- comes back whole, capped at 12,000 characters.
 
 Hosted, a tool that would hold a connection open for minutes — a crawl, a run you asked to wait for, a multi-URL scrape — hands back a job after `MESHARC_MCP_WAIT` seconds (25 by default, because many MCP hosts time a tool call out sooner). The work carries on server-side and `get_job` picks it up. Run locally, those tools block as they always have.
 
