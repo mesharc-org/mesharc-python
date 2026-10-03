@@ -19,6 +19,10 @@ All notable changes to this package are recorded here. The format follows
 - `Crawl.page(url)` (`GET /crawl/{id}/page`), the API route behind that. The URL matches under either scheme and with or without a trailing slash. **This needs an API that has the route**: 0.3.1 requires the Seam-be deploy that added it.
 - `Crawl.pages(..., cursor=...)` resumes a page walk from where an earlier one stopped instead of starting at the top.
 
+### Changed
+
+- A tool refused for want of scope now says so. Hosted, a read-only connection asking for anything that fetches or writes got the API's `this needs the member role` -- true, and nothing an assistant can act on, since it does not know what a role is or that the person who approved the connection chose it. It now answers `{"code": "read_only"}` explaining that read-only covers what the workspace has stored but not fetching a new page, because fetching spends credits, and that reconnecting with write access is the fix. The API's own words are kept under `detail`, the other 403s (suspended, email_unverified, mfa_required) are untouched, and stdio passes the API's answer through because it cannot see its key's scopes.
+
 ## 0.3.0 - 2026-09-30
 
 ### Added

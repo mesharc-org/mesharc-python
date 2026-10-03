@@ -203,3 +203,54 @@ def test_scraping_one_url_still_returns_the_whole_page(monkeypatch):
     assert page["markdown"] == "m" * 900
     assert isinstance(page["links"], list) and len(page["links"]) == 4
     assert "index" not in out, "one page is not a result that needs an index"
+
+
+# --- what a read-only connection is told ---------------------------------
+
+def _refuse(status, detail, code=""):
+    from mesharc import MeshArcError
+
+    def boom():
+        raise MeshArcError(status, detail, code=code)
+    return boom
+
+
+def test_a_read_only_connection_is_told_why_rather_than_about_roles(monkeypatch):
+    """"this needs the member role" is true and useless: an assistant does
+    not know what a role is, that it has one, or that the person who
+    approved the connection chose it."""
+    monkeypatch.setattr(mcp_mod, "_scopes", lambda: ["read"])
+    # "forbidden" is what the API actually sends: it fills a code on every
+    # error, so a test written against a code-less 403 passes while the
+    # thing it is testing never happens.
+    out = mcp_mod._safe(_refuse(403, "this needs the member role", code="forbidden"))
+    assert out["code"] == "read_only"
+    assert "approved read-only" in out["error"]
+    assert "write access" in out["error"], "it has to say what would fix it"
+    assert out["detail"] == "this needs the member role", "the API's own words are kept"
+
+
+def test_a_connection_with_write_hears_the_api(monkeypatch):
+    monkeypatch.setattr(mcp_mod, "_scopes", lambda: ["read", "write"])
+    out = mcp_mod._safe(_refuse(403, "this needs the owner role", code="forbidden"))
+    assert out == {"error": "this needs the owner role", "status": 403}
+
+
+def test_the_other_refusals_keep_saying_what_they_say(monkeypatch):
+    """A suspended workspace and an unverified address are also 403s, and
+    neither is a scope problem. They carry a code; the role check does not."""
+    monkeypatch.setattr(mcp_mod, "_scopes", lambda: ["read"])
+    for code, detail in (("suspended", "this workspace is suspended; contact support"),
+                         ("email_unverified", "verify your email address first"),
+                         ("mfa_required", "this workspace requires two-factor authentication")):
+        out = mcp_mod._safe(_refuse(403, detail, code=code))
+        assert out == {"error": detail, "status": 403}, code
+
+
+def test_locally_the_server_does_not_guess_at_the_key(monkeypatch):
+    """Stdio holds one key and cannot see its scopes, so it passes the API's
+    answer through rather than asserting something it does not know."""
+    monkeypatch.setattr(mcp_mod, "_HTTP", False)
+    assert mcp_mod._scopes() is None
+    out = mcp_mod._safe(_refuse(403, "this needs the member role", code="forbidden"))
+    assert out == {"error": "this needs the member role", "status": 403}
