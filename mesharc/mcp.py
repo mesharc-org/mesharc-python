@@ -49,8 +49,22 @@ from mesharc import MeshArc, MeshArcError, MeshArcTimeoutError
 # names here instead meant `error` was missed and failed crawls polled for ever.
 from mesharc import _running
 
+# One page asked for on its own: how much of its body comes back.
 MARKDOWN_CAP = 12_000
+# A multi-page result: how many pages carry an excerpt, and how many
+# characters of excerpt the whole answer gets to spend between them. The cap
+# used to be per page, which is the bug this fixes: fifty pages at twelve
+# thousand each is an answer no assistant can load, and the link lists alone
+# ran to a megabyte. A reader now gets an index of everything, a taste of each
+# page, and a way to ask for the one page it actually wants.
 PAGES_CAP = 50
+RESULT_BUDGET = 60_000
+# Below this an excerpt says nothing, so the budget is allowed to overrun
+# rather than hand back fifty useless fragments.
+EXCERPT_FLOOR = 600
+# Rows in the index: every page the crawl found, up to this, so an assistant
+# knows what exists even where the excerpts are short.
+INDEX_CAP = 500
 
 NAME = "mesharc"
 INSTRUCTIONS = (
@@ -188,12 +202,70 @@ def _budget():
 
 
 def _trim_page(p):
+    """One page, as a single-page tool returns it: all of it, bodies capped."""
     if isinstance(p, dict):
         for k in ("markdown", "text", "cleanHtml", "html"):
             if isinstance(p.get(k), str) and len(p[k]) > MARKDOWN_CAP:
                 p[k] = p[k][:MARKDOWN_CAP] + f"\n… [{len(p[k]) - MARKDOWN_CAP} more characters; fetch this page alone for all of it]"
         p.pop("response", None)
     return p
+
+
+def _index_row(p):
+    """What a page is, in four fields: enough to choose it by."""
+    head = p.get("head")
+    return {"url": p.get("url", ""),
+            "title": (head.get("title") or "") if isinstance(head, dict) else "",
+            "words": p.get("words"), "status": p.get("status")}
+
+
+def _summary_page(p, cap, how=""):
+    """One page of a multi-page result: what it is, and a taste of it.
+
+    Everything else goes: the link list, with a count in its place -- it was
+    the single biggest thing in a crawl result, ahead of all the markdown put
+    together -- the head apart from the title, and the diagnostic fields an
+    assistant has no use for. `how` says how to come back for the whole page,
+    and is added only where the body was actually cut.
+    """
+    if not isinstance(p, dict):
+        return p
+    out = _index_row(p)
+    links = p.get("links")
+    out["links"] = len(links) if isinstance(links, list) else 0
+    body = p.get("markdown")
+    if isinstance(body, str) and body:
+        out["markdown"] = body[:cap]
+        if len(body) > cap:
+            out["markdown"] += (f"\n… [{len(body) - cap} more characters"
+                                + (f"; {how}" if how else "") + "]")
+    return out
+
+
+def _excerpt_cap(pages, fixed_cost):
+    """How much of each page's body fits, once the rest is paid for."""
+    if pages <= 0:
+        return MARKDOWN_CAP
+    return max(EXCERPT_FLOOR, min(MARKDOWN_CAP, (RESULT_BUDGET - fixed_cost) // pages))
+
+
+def _excerpts(rows, how):
+    """The first `PAGES_CAP` pages with the body budget shared between them,
+    the index of all of them, and the cap that was settled on.
+
+    The budget is for the whole answer, not for the bodies in it, so what the
+    shape itself costs -- the keys, the urls, the titles, the note on a cut
+    excerpt -- is measured and paid for before a single character of body is.
+    Summarising at a cap of zero is that measurement. Budgeting the bodies
+    alone overran by four thousand characters at fifty pages, which is the
+    kind of miss that only shows up once something downstream refuses to
+    load the answer.
+    """
+    shown = rows[:PAGES_CAP]
+    index = [_index_row(p) for p in rows]
+    frame = len(json.dumps([_summary_page(p, 0, how) for p in shown]))
+    cap = _excerpt_cap(len(shown), len(json.dumps(index)) + frame)
+    return [_summary_page(p, cap, how) for p in shown], index, cap
 
 
 def _still_running(kind, job_id, counts=None, project_id=None):
@@ -212,18 +284,48 @@ def _still_running(kind, job_id, counts=None, project_id=None):
 
 def _crawl_result(job, pages):
     """A finished crawl, shaped once. `crawl_site` and `get_job` both call
-    this, so the two cannot drift apart."""
+    this, so the two cannot drift apart.
+
+    `index` is every page the walk saw; `pages` is the first `PAGES_CAP` of
+    them with an excerpt each. A two-hundred page crawl came back at 2.2
+    million characters before this -- more than a client will load, let alone
+    a context window -- so the answer is now a map with samples on it, and two
+    ways to drill in: one page in full, or the next window of pages.
+    """
+    from mesharc import _cursor_of
     e = job.envelope
-    return {"crawl_id": job.id, "status": e.get("status"), "url": e.get("url", ""),
-            "pages": [_trim_page(p) for p in pages][:PAGES_CAP],
-            "counts": e.get("counts"), "stop": e.get("stop", ""),
-            "note": ("this crawl is kept for a day unless keep_crawl_as_project is called"
-                     if e.get("ephemeral") else "")}
+    rows = [p for p in pages if isinstance(p, dict)][:INDEX_CAP]
+    shaped, index, cap = _excerpts(rows, "call get_job with this page's url")
+    notes = []
+    if any(isinstance(p.get("markdown"), str) and len(p["markdown"]) > cap
+           for p in rows[:PAGES_CAP]):
+        notes.append("the excerpts are cut: call get_job with this crawl's id and "
+                     "url=<a page's url> for that page in full")
+    nxt = _cursor_of(e.get("next") or "") if e.get("next") else ""
+    if nxt or len(rows) > PAGES_CAP:
+        notes.append("index lists every page found; call get_job with cursor= for the "
+                     "next window of excerpts")
+    if e.get("ephemeral"):
+        notes.append("this crawl is kept for a day unless keep_crawl_as_project is called")
+    out = {"crawl_id": job.id, "status": e.get("status"), "url": e.get("url", ""),
+           "pages": shaped,
+           "index": index, "counts": e.get("counts"), "stop": e.get("stop", ""),
+           "note": ". ".join(notes)}
+    if nxt:
+        out["cursor"] = nxt
+    return out
 
 
 def _batch_result(b):
-    """A finished multi-URL scrape, shaped once."""
-    b["pages"] = [_trim_page(p) for p in b.get("pages", [])[:PAGES_CAP]]
+    """A finished multi-URL scrape, shaped once.
+
+    Shaped like a crawl, for the same reason: five hundred URLs at a full page
+    each is not an answer. One URL is the exception -- `scrape_urls` with a
+    single url returns the whole page, because that is plainly what was asked
+    for.
+    """
+    rows = [p for p in b.get("pages", []) if isinstance(p, dict)][:INDEX_CAP]
+    b["pages"], b["index"], _cap = _excerpts(rows, "call extract_url on it")
     return b
 
 
@@ -355,11 +457,11 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
             # hosted mode gives it a budget and hands back the job id instead.
             budget = _budget()
             if budget is None:
-                return _crawl_result(job, islice(job.pages(limit=PAGES_CAP), PAGES_CAP))
+                return _crawl_result(job, islice(job.pages(limit=PAGES_CAP), INDEX_CAP))
             try:
-                # islice, not list: `pages()` walks the whole crawl, and only
-                # PAGES_CAP of it is ever returned.
-                pages = list(islice(job.pages(limit=PAGES_CAP, timeout=budget), PAGES_CAP))
+                # islice, not list: `pages()` walks the whole crawl. INDEX_CAP
+                # of it is indexed and PAGES_CAP of it is excerpted.
+                pages = list(islice(job.pages(limit=PAGES_CAP, timeout=budget), INDEX_CAP))
             except MeshArcTimeoutError:
                 # The budget, not a failure: the crawl is still going, and
                 # `pages()` says so by raising once its deadline passes.
@@ -535,24 +637,40 @@ def recrawl_pages(project_id: str, urls: list[str]) -> dict:
 @tool(description="Follow a job a long tool handed back: a crawl from crawl_site, a run from start_run, or a "
                          "batch from scrape_urls. Returns its status and counts, and once it has finished, the same "
                          "result the original tool would have given. kind: crawl | run | batch. A run needs its "
-                         "project_id. Costs nothing.")
-def get_job(kind: str, id: str, project_id: str | None = None) -> dict:
-    """The other half of a bounded wait.
+                         "project_id. For a crawl, `url` returns that one page in full instead of the excerpts, and "
+                         "`cursor` (from the crawl result) returns the next window of pages. Costs nothing.")
+def get_job(kind: str, id: str, project_id: str | None = None,
+            url: str | None = None, cursor: str | None = None) -> dict:
+    """The other half of a bounded wait, and the way into a large crawl.
 
     A tool that stopped waiting has to leave something to come back to, and
     this is it. The result of a finished job is shaped by the same helpers the
     original tool uses, so what an assistant gets by polling is what it would
     have got by waiting.
+
+    A crawl result is a map with samples on it, which leaves two things to ask
+    for afterwards and both arrive here. `url` is one page in full -- readable
+    while the crawl is still going, because a page that has been crawled is
+    stored. `cursor` is the next window of pages.
     """
     def go():
         s = _client()
         if kind == "crawl":
             job = s.get_crawl(id)
-            if _running(job.envelope.get("status")):
+            if url:
+                # Readable before the crawl ends, and the link list goes: a
+                # reader asking for one page wants the page, not its outbound
+                # links, which is what made the crawl result unloadable.
+                page = job.page(url)
+                if isinstance(page, dict):
+                    page.pop("links", None)
+                return _trim_page(page)
+            if _running(job.envelope.get("status")) and not cursor:
                 return _still_running("crawl", id, job.envelope.get("counts"))
             # Finished, however it finished -- `error` and `cancelled` included.
             # An assistant has to be told a crawl failed, not kept polling.
-            return _crawl_result(job, islice(job.pages(limit=PAGES_CAP, wait=False), PAGES_CAP))
+            return _crawl_result(job, islice(
+                job.pages(limit=PAGES_CAP, wait=False, cursor=cursor), INDEX_CAP))
         if kind == "run":
             if not project_id:
                 return {"error": "a run needs its project_id", "code": "validation"}

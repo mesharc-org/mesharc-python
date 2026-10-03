@@ -261,7 +261,8 @@ def test_a_finished_crawl_is_finished_however_it_finished():
 
 def test_only_the_cap_is_ever_fetched():
     """`pages()` walks the whole crawl in batches. Materialising it and slicing
-    afterwards fetched every page to keep fifty."""
+    afterwards fetched every page of a ten-thousand page crawl to keep the
+    few hundred that are indexed."""
     from itertools import islice
 
     asked = []
@@ -271,9 +272,9 @@ def test_only_the_cap_is_ever_fetched():
             asked.append(i)
             yield {"url": f"https://x.test/{i}"}
 
-    kept = list(islice(pages(limit=mcp_mod.PAGES_CAP), mcp_mod.PAGES_CAP))
-    assert len(kept) == mcp_mod.PAGES_CAP
-    assert len(asked) == mcp_mod.PAGES_CAP, "a page not returned should not have been fetched"
+    kept = list(islice(pages(limit=mcp_mod.PAGES_CAP), mcp_mod.INDEX_CAP))
+    assert len(kept) == mcp_mod.INDEX_CAP
+    assert len(asked) == mcp_mod.INDEX_CAP, "a page not returned should not have been fetched"
 
 
 def test_the_introspection_call_does_not_block_the_loop():
