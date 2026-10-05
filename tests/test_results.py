@@ -29,9 +29,17 @@ class _Job:
         self.asked = []
 
     def pages(self, limit=25, wait=True, cursor=None, **_kw):
+        """Batched, as the API pages: the envelope moves with the walk, which
+        is where the next window's cursor comes from."""
         self.asked.append({"limit": limit, "wait": wait, "cursor": cursor})
         start = int(cursor or 0)
-        yield from self._pages[start:]
+        rows = self._pages[start:]
+        for at in range(0, len(rows), limit):
+            batch = rows[at:at + limit]
+            self.envelope = {**self.envelope,
+                             "cursor": str(start + at + len(batch)),
+                             "next": "?cursor=x" if start + at + limit < len(self._pages) else None}
+            yield from batch
 
     def page(self, url):
         for p in self._pages:
@@ -51,11 +59,38 @@ def _page(i, links=200, chars=20_000):
             "fields": {"a": "b"}, "signals": {"blocked": False}, "htmlBytes": 98765}
 
 
+@pytest.mark.parametrize("pages", [50, 200, 500, 700])
+def test_a_crawl_result_keeps_the_budget_it_promises(pages):
+    """At 50 this passed against a hand-picked 65,000, while the code promised
+    60,000 and a 500-page crawl came back at 101,399. The budget is the
+    assertion now, and the sizes that broke it are in the list."""
+    job = _Job([_page(i) for i in range(pages)])
+    out = mcp_mod._crawl_result(job, *mcp_mod._walk(job))
+    size = len(json.dumps(out))
+    assert size <= mcp_mod.RESULT_BUDGET, f"{size:,} characters against a promise of {mcp_mod.RESULT_BUDGET:,}"
+    assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS, "an index with nothing to read is not an answer"
+    assert all(len(p["markdown"]) >= mcp_mod.EXCERPT_FLOOR for p in out["pages"])
+
+
+@pytest.mark.parametrize("pages", [51, 200, 500, 700])
+def test_a_cursor_is_named_only_when_it_is_there(pages):
+    """The answer told an assistant to "call get_job with cursor=" and carried
+    no cursor, for every crawl of 51 to 500 pages."""
+    job = _Job([_page(i) for i in range(pages)])
+    out = mcp_mod._crawl_result(job, *mcp_mod._walk(job))
+    assert ("cursor=" in out["note"]) == ("cursor" in out)
+    assert out["cursor"] == str(mcp_mod.PAGES_CAP), "the walk resumes after the first batch"
+    # And it resumes from there.
+    job2 = _Job([_page(i) for i in range(pages)])
+    nxt = mcp_mod._crawl_result(job2, *mcp_mod._walk(job2, cursor=out["cursor"]))
+    assert nxt["index"][0]["url"] == f"https://x.test/{mcp_mod.PAGES_CAP}"
+
+
 def test_fifty_fat_pages_stay_inside_the_budget():
     job = _Job([_page(i) for i in range(50)])
     out = mcp_mod._crawl_result(job, job.pages())
     size = len(json.dumps(out))
-    assert size <= 65_000, f"{size} characters is more than a client will load"
+    assert size <= mcp_mod.RESULT_BUDGET, f"{size} characters is more than promised"
 
     # The links are the single biggest thing that was in here.
     assert all(isinstance(p["links"], int) for p in out["pages"])
@@ -86,10 +121,10 @@ def test_a_small_crawl_is_not_rationed():
 
 def test_the_index_covers_pages_the_excerpts_do_not():
     job = _Job([_page(i, links=1, chars=100) for i in range(120)])
-    out = mcp_mod._crawl_result(job, job.pages())
-    assert len(out["pages"]) == mcp_mod.PAGES_CAP
+    out = mcp_mod._crawl_result(job, *mcp_mod._walk(job))
+    assert 0 < len(out["pages"]) <= mcp_mod.PAGES_CAP
     assert len(out["index"]) == 120, "an assistant has to know what exists, not just what it was shown"
-    assert "cursor=" in out["note"]
+    assert "in the index" in out["note"]
 
 
 def test_the_index_itself_is_bounded():
@@ -98,20 +133,25 @@ def test_the_index_itself_is_bounded():
     assert len(out["index"]) == mcp_mod.INDEX_CAP
 
 
-def test_an_excerpt_is_never_cut_to_nothing():
-    """The floor. A budget divided by enough pages reaches zero, and fifty
-    empty strings are worse than fifty short ones."""
-    assert mcp_mod._excerpt_cap(5_000, 0) == mcp_mod.EXCERPT_FLOOR
-    assert mcp_mod._excerpt_cap(50, 5_000) == (mcp_mod.RESULT_BUDGET - 5_000) // 50
-    assert mcp_mod._excerpt_cap(3, 0) == mcp_mod.MARKDOWN_CAP, "a short crawl gets whole pages"
-    assert mcp_mod._excerpt_cap(0, 0) == mcp_mod.MARKDOWN_CAP
+def test_the_budget_buys_fewer_excerpts_rather_than_thinner_ones():
+    """The correction. Dividing the budget by fifty and clamping each share up
+    to the floor made the floor win and the total overrun; spending on as many
+    pages as the budget covers keeps both the floor and the promise."""
+    few, _index, cap, _kept = mcp_mod._excerpts([_page(i, links=1, chars=50_000) for i in range(3)], "x")
+    assert cap == mcp_mod.MARKDOWN_CAP and len(few) == 3, "a short crawl gets whole pages"
+
+    many, index, cap, kept = mcp_mod._excerpts([_page(i) for i in range(500)], "x")
+    assert len(many) < mcp_mod.PAGES_CAP, "fewer pages, not a thinner one each"
+    assert cap >= mcp_mod.EXCERPT_FLOOR
+    assert kept == len(index)
+    assert len(json.dumps(index)) + len(json.dumps(many)) <= mcp_mod.RESULT_BUDGET
 
 
-def test_the_next_window_is_offered_and_resumed_from():
-    job = _Job([_page(i, links=1, chars=100) for i in range(80)],
-               envelope={"next": "https://api.test/api/v1/crawl/c1?cursor=abc123&limit=50"})
-    out = mcp_mod._crawl_result(job, job.pages())
-    assert out["cursor"] == "abc123"
+def test_the_cut_note_on_one_page_does_not_ask_for_the_call_just_made():
+    """It said "fetch this page alone for all of it" to a caller that had."""
+    out = mcp_mod._trim_page(_page(0, chars=20_000))
+    assert "fetch this page alone" not in out["markdown"]
+    assert "cap for one page" in out["markdown"]
 
 
 def test_a_batch_is_shaped_like_a_crawl():

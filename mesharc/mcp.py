@@ -62,6 +62,9 @@ RESULT_BUDGET = 60_000
 # Below this an excerpt says nothing, so the budget is allowed to overrun
 # rather than hand back fifty useless fragments.
 EXCERPT_FLOOR = 600
+# However tight the budget, this many pages carry a readable excerpt: an
+# index with nothing to read is a list of links, not an answer.
+MIN_EXCERPTS = 5
 # Rows in the index: every page the crawl found, up to this, so an assistant
 # knows what exists even where the excerpts are short.
 INDEX_CAP = 500
@@ -206,7 +209,9 @@ def _trim_page(p):
     if isinstance(p, dict):
         for k in ("markdown", "text", "cleanHtml", "html"):
             if isinstance(p.get(k), str) and len(p[k]) > MARKDOWN_CAP:
-                p[k] = p[k][:MARKDOWN_CAP] + f"\n… [{len(p[k]) - MARKDOWN_CAP} more characters; fetch this page alone for all of it]"
+                p[k] = p[k][:MARKDOWN_CAP] + (
+                    f"\n… [{len(p[k]) - MARKDOWN_CAP} more characters; "
+                    f"{MARKDOWN_CAP:,} is the cap for one page]")
         p.pop("response", None)
     return p
 
@@ -242,30 +247,56 @@ def _summary_page(p, cap, how=""):
     return out
 
 
-def _excerpt_cap(pages, fixed_cost):
-    """How much of each page's body fits, once the rest is paid for."""
-    if pages <= 0:
-        return MARKDOWN_CAP
-    return max(EXCERPT_FLOOR, min(MARKDOWN_CAP, (RESULT_BUDGET - fixed_cost) // pages))
+def _cost(obj):
+    return len(json.dumps(obj))
 
 
-def _excerpts(rows, how):
-    """The first `PAGES_CAP` pages with the body budget shared between them,
-    the index of all of them, and the cap that was settled on.
+def _excerpts(rows, how, reserve=0):
+    """How a multi-page answer spends its budget: (pages, index, cap, kept).
 
-    The budget is for the whole answer, not for the bodies in it, so what the
-    shape itself costs -- the keys, the urls, the titles, the note on a cut
-    excerpt -- is measured and paid for before a single character of body is.
-    Summarising at a cap of zero is that measurement. Budgeting the bodies
-    alone overran by four thousand characters at fifty pages, which is the
-    kind of miss that only shows up once something downstream refuses to
-    load the answer.
+    `reserve` is what the answer costs around these two -- its status, counts,
+    note and the rest. The caller measures it rather than guessing, because
+    guessing is how the first version came out at 60,190 against a promise of
+    60,000: everything inside the pages was counted and the envelope holding
+    them was not.
+
+    `RESULT_BUDGET` is for the whole answer, so everything is measured, not
+    estimated -- the keys, the urls, the titles and the note on a cut excerpt
+    as much as the bodies. Summarising at a cap of zero is that measurement.
+
+    Order of claims. The index is the map and is paid first, because an
+    assistant that knows what exists can ask for any of it; a sample of fifty
+    pages with no map is the weaker answer. Then as many excerpts as the rest
+    will pay for at the floor -- **fewer excerpts, not thinner ones**. That is
+    the correction: dividing the budget by fifty and clamping each share up to
+    the floor made the floor win, and a five-hundred page crawl came back at
+    101,399 characters against a promise of 60,000. A promise a result does not
+    keep is worse than a smaller promise, and this one existed to stop exactly
+    the answer it was producing.
+
+    The map can still be trimmed, but only to leave room for `MIN_EXCERPTS`
+    samples: a thousand rows of index and nothing to read is not an answer
+    either. `kept` is how many rows of the index survived, so the caller can
+    say so rather than implying the crawl was that size.
     """
-    shown = rows[:PAGES_CAP]
+    budget = max(MIN_EXCERPTS * EXCERPT_FLOOR, RESULT_BUDGET - reserve)
     index = [_index_row(p) for p in rows]
-    frame = len(json.dumps([_summary_page(p, 0, how) for p in shown]))
-    cap = _excerpt_cap(len(shown), len(json.dumps(index)) + frame)
-    return [_summary_page(p, cap, how) for p in shown], index, cap
+    floor_cost = MIN_EXCERPTS * EXCERPT_FLOOR
+    while len(index) > MIN_EXCERPTS and _cost(index) + floor_cost > budget:
+        index = index[:max(MIN_EXCERPTS, len(index) - max(1, len(index) // 10))]
+    spent = _cost(index)
+
+    shown = rows[:PAGES_CAP]
+    while shown:
+        frame = _cost([_summary_page(p, 0, how) for p in shown])
+        if spent + frame + len(shown) * EXCERPT_FLOOR <= budget:
+            break
+        shown = shown[:len(shown) - max(1, len(shown) // 5)]
+    if not shown:
+        return [], index, MARKDOWN_CAP, len(index)
+    frame = _cost([_summary_page(p, 0, how) for p in shown])
+    cap = max(EXCERPT_FLOOR, min(MARKDOWN_CAP, (budget - spent - frame) // len(shown)))
+    return [_summary_page(p, cap, how) for p in shown], index, cap, len(index)
 
 
 def _still_running(kind, job_id, counts=None, project_id=None):
@@ -282,7 +313,24 @@ def _still_running(kind, job_id, counts=None, project_id=None):
             "note": "call get_job with this job to check; it keeps running server-side"}
 
 
-def _crawl_result(job, pages):
+def _walk(job, **how):
+    """Up to `INDEX_CAP` pages, and the cursor the next window starts at.
+
+    Two slices of one generator rather than one slice of a list. `pages()`
+    fetches in batches of `PAGES_CAP`, so once the first `PAGES_CAP` rows have
+    been taken the envelope is that batch's and its cursor is the position just
+    past them -- which is exactly what a caller asking for the next window of
+    excerpts resumes from. Walking the whole crawl and slicing afterwards
+    throws that position away, which is why the answer used to tell an
+    assistant to pass a cursor and then not give it one.
+    """
+    walk = job.pages(limit=PAGES_CAP, **how)
+    first = list(islice(walk, PAGES_CAP))
+    tail = (job.envelope.get("cursor") or "") if len(first) == PAGES_CAP else ""
+    return first + list(islice(walk, max(0, INDEX_CAP - PAGES_CAP))), tail
+
+
+def _crawl_result(job, pages, window=""):
     """A finished crawl, shaped once. `crawl_site` and `get_job` both call
     this, so the two cannot drift apart.
 
@@ -292,27 +340,51 @@ def _crawl_result(job, pages):
     a context window -- so the answer is now a map with samples on it, and two
     ways to drill in: one page in full, or the next window of pages.
     """
-    from mesharc import _cursor_of
     e = job.envelope
     rows = [p for p in pages if isinstance(p, dict)][:INDEX_CAP]
-    shaped, index, cap = _excerpts(rows, "call get_job with this page's url")
+    # Build it, weigh it, and if the shell tipped it over, hand the overshoot
+    # back as a reserve and build again. Two passes settle it; the loop is
+    # bounded because each pass reserves strictly more.
+    reserve, out = 0, None
+    for _attempt in range(4):
+        out = _shape_crawl(job, e, rows, window, reserve)
+        over = _cost(out) - RESULT_BUDGET
+        if over <= 0:
+            break
+        reserve += over + 64
+    return out
+
+
+def _shape_crawl(job, e, rows, window, reserve):
+    """One pass at the answer, at the budget `reserve` leaves."""
+    shaped, index, cap, kept = _excerpts(rows, "call get_job with this page's url", reserve)
     notes = []
-    if any(isinstance(p.get("markdown"), str) and len(p["markdown"]) > cap
-           for p in rows[:PAGES_CAP]):
+    if any(isinstance(p.get("markdown"), str) and len(p["markdown"]) > cap for p in rows[:len(shaped)]):
         notes.append("the excerpts are cut: call get_job with this crawl's id and "
                      "url=<a page's url> for that page in full")
-    nxt = _cursor_of(e.get("next") or "") if e.get("next") else ""
-    if nxt or len(rows) > PAGES_CAP:
-        notes.append("index lists every page found; call get_job with cursor= for the "
-                     "next window of excerpts")
+    if kept < len(rows):
+        notes.append(f"the index lists {kept} of the {len(rows)} pages read, to stay inside "
+                     f"{RESULT_BUDGET:,} characters")
+    # The cursor is a batch boundary -- it resumes the walk after the first
+    # PAGES_CAP rows -- so the note says that rather than "the next window",
+    # which would read as "the pages after the ones excerpted here" and be
+    # wrong by however many of that batch the budget could not excerpt. Those
+    # are in the index either way. And it is only mentioned when it is here:
+    # the answer used to name a cursor it did not carry.
+    more = len(rows) > len(shaped) or bool(e.get("next"))
+    window = window if more else ""
+    if more:
+        notes.append("more pages than are excerpted here. Every page read is in the index, and "
+                     "get_job with url=<a page's url> reads any one in full"
+                     + (f"; get_job with cursor= continues after the first {PAGES_CAP} read"
+                        if window else ""))
     if e.get("ephemeral"):
         notes.append("this crawl is kept for a day unless keep_crawl_as_project is called")
     out = {"crawl_id": job.id, "status": e.get("status"), "url": e.get("url", ""),
-           "pages": shaped,
-           "index": index, "counts": e.get("counts"), "stop": e.get("stop", ""),
-           "note": ". ".join(notes)}
-    if nxt:
-        out["cursor"] = nxt
+           "pages": shaped, "index": index, "counts": e.get("counts"),
+           "stop": e.get("stop", ""), "note": ". ".join(notes)}
+    if window:
+        out["cursor"] = window
     return out
 
 
@@ -325,7 +397,7 @@ def _batch_result(b):
     for.
     """
     rows = [p for p in b.get("pages", []) if isinstance(p, dict)][:INDEX_CAP]
-    b["pages"], b["index"], _cap = _excerpts(rows, "call extract_url on it")
+    b["pages"], b["index"], _cap, _kept = _excerpts(rows, "call extract_url on it")
     return b
 
 
@@ -383,7 +455,8 @@ def _scopes():
 READ_ONLY = (
     "this connection was approved read-only. It can read what the workspace has "
     "already stored -- projects, pages, change records, search, get_job -- but it "
-    "cannot fetch a new page or change anything, because fetching spends credits. "
+    "cannot fetch a new page or change anything: those reach the site or alter the "
+    "workspace, and most of them spend credits. "
     "Ask the person to reconnect the app and tick write access."
 )
 
@@ -513,16 +586,14 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
             # hosted mode gives it a budget and hands back the job id instead.
             budget = _budget()
             if budget is None:
-                return _crawl_result(job, islice(job.pages(limit=PAGES_CAP), INDEX_CAP))
+                return _crawl_result(job, *_walk(job))
             try:
-                # islice, not list: `pages()` walks the whole crawl. INDEX_CAP
-                # of it is indexed and PAGES_CAP of it is excerpted.
-                pages = list(islice(job.pages(limit=PAGES_CAP, timeout=budget), INDEX_CAP))
+                pages, window = _walk(job, timeout=budget)
             except MeshArcTimeoutError:
                 # The budget, not a failure: the crawl is still going, and
                 # `pages()` says so by raising once its deadline passes.
                 return _still_running("crawl", job.id, job.envelope.get("counts"))
-            return _crawl_result(job, pages)
+            return _crawl_result(job, pages, window)
     return _safe(go)
 
 
@@ -725,8 +796,8 @@ def get_job(kind: str, id: str, project_id: str | None = None,
                 return _still_running("crawl", id, job.envelope.get("counts"))
             # Finished, however it finished -- `error` and `cancelled` included.
             # An assistant has to be told a crawl failed, not kept polling.
-            return _crawl_result(job, islice(
-                job.pages(limit=PAGES_CAP, wait=False, cursor=cursor), INDEX_CAP))
+            pages, window = _walk(job, wait=False, cursor=cursor)
+            return _crawl_result(job, pages, window)
         if kind == "run":
             if not project_id:
                 return {"error": "a run needs its project_id", "code": "validation"}
