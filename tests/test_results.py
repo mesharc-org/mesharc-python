@@ -254,3 +254,23 @@ def test_locally_the_server_does_not_guess_at_the_key(monkeypatch):
     assert mcp_mod._scopes() is None
     out = mcp_mod._safe(_refuse(403, "this needs the member role", code="forbidden"))
     assert out == {"error": "this needs the member role", "status": 403}
+
+
+def test_a_webhook_signing_secret_never_reaches_an_assistant():
+    """The API returns it with a project, for a program that will verify
+    signatures with it. A tool's answer goes into a model's context, where
+    nothing can use it and it should not be."""
+    out = mcp_mod._safe(lambda: {"id": "p1", "name": "Site", "webhookSecret": "whsec_live_abc"})
+    assert "webhookSecret" not in out
+    assert "whsec_live_abc" not in str(out)
+    assert "MeshArc app" in out["webhookSecretNote"], "say where it can be seen"
+    # A project with no webhook configured gains no note.
+    assert mcp_mod._safe(lambda: {"id": "p1", "webhookSecret": ""}) == {"id": "p1", "webhookSecret": ""}
+
+
+def test_the_settings_guide_lists_every_tier_the_api_takes():
+    """`auto` is accepted (api/projects.py max_tier) and was missing here, so
+    an assistant reading the guide would never set it."""
+    assert "'auto'" in mcp_mod.CONFIG_GUIDE["max_tier"]
+    for tier in ("http", "browser", "stealth"):
+        assert f"'{tier}'" in mcp_mod.CONFIG_GUIDE["max_tier"]
