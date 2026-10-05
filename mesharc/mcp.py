@@ -388,9 +388,27 @@ READ_ONLY = (
 )
 
 
+# The API returns a project's webhook signing secret with the project, which
+# is right for a program that is going to verify signatures with it. A tool's
+# answer is not that: it goes through somebody's AI app and into a model's
+# context, where a shared secret has no business being and nothing can use it.
+# Dropped here, in the one place every tool's answer passes through, so a tool
+# added later cannot leak it either -- and not at the API, which the SDK and
+# the app still need it from.
+WEBHOOK_SECRET_NOTE = ("withheld from assistants; the signing secret is on the "
+                       "project's page in the MeshArc app")
+
+
+def _no_secret(out):
+    if isinstance(out, dict) and out.get("webhookSecret"):
+        out = {k: v for k, v in out.items() if k != "webhookSecret"}
+        out["webhookSecretNote"] = WEBHOOK_SECRET_NOTE
+    return out
+
+
 def _safe(fn):
     try:
-        return fn()
+        return _no_secret(fn())
     except MeshArcError as exc:
         out = {"error": exc.detail, "status": exc.status}
         # A 403 carrying the status's own default code is the role check. The
@@ -542,7 +560,7 @@ CONFIG_GUIDE = {
     "crawl_delay_ms": "milliseconds between requests to the host (default 1000)",
     "concurrency": "pages fetched at once (1-8)",
     "render_js": "'auto' (a browser only when the page needs one; default), 'always', 'never'",
-    "max_tier": "the highest rung allowed: 'http', 'browser', 'stealth'",
+    "max_tier": "the highest rung allowed: 'auto' (as high as the plan allows), 'http', 'browser', 'stealth'",
     "max_credits_per_page": "cap on what one page may cost; 0 = no cap",
     "formats": "list of bodies to keep: 'markdown', 'text', 'cleanHtml', 'rawHtml', 'links', 'screenshot', 'json'",
     "only_main_content": "true drops navigation, headers, footers and sidebars from the markdown",
