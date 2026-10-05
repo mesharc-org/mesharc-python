@@ -68,6 +68,8 @@ MIN_EXCERPTS = 5
 # Rows in the index: every page the crawl found, up to this, so an assistant
 # knows what exists even where the excerpts are short.
 INDEX_CAP = 500
+# A batch past its index: the urls that did not come back ok, named up to this.
+REST_BUDGET = 8_000
 
 NAME = "mesharc"
 INSTRUCTIONS = (
@@ -397,8 +399,42 @@ def _batch_result(b):
     for.
     """
     rows = [p for p in b.get("pages", []) if isinstance(p, dict)][:INDEX_CAP]
-    b["pages"], b["index"], _cap, _kept = _excerpts(rows, "call extract_url on it")
-    return b
+    base = {k: v for k, v in b.items() if k != "pages"}
+    # Built, weighed, and rebuilt with the overshoot reserved, as a crawl is.
+    reserve, out = 0, None
+    for _attempt in range(4):
+        out = _shape_batch(base, rows, reserve)
+        over = _cost(out) - RESULT_BUDGET
+        if over <= 0:
+            break
+        reserve += over + 64
+    return out
+
+
+def _shape_batch(base, rows, reserve):
+    """One pass at a batch's answer, at the budget `reserve` leaves. The caller
+    named every url and needs to know how each went: past the index, a count by
+    status and the urls that did not come back ok."""
+    pages, index, _cap, kept = _excerpts(rows, "call extract_url on it", reserve)
+    out = {**base, "pages": pages, "index": index}
+    rest = rows[kept:]
+    if rest:
+        by_status: dict = {}
+        for p in rest:
+            by_status[str(p.get("status"))] = by_status.get(str(p.get("status")), 0) + 1
+        not_ok, size = [], 0
+        for p in rest:
+            if p.get("status") != "ok":
+                row = {"url": p.get("url", ""), "status": p.get("status")}
+                size += _cost(row)
+                if size > REST_BUDGET:
+                    break
+                not_ok.append(row)
+        out["rest"] = {"count": len(rest), "byStatus": by_status, "notOk": not_ok}
+        out["note"] = (f"the index lists the first {kept} of {len(rows)} urls; `rest` counts the others by "
+                       "status and names those that did not come back ok. extract_url reads one again, "
+                       "and spends credits doing it")
+    return out
 
 
 def _with_documents(config, parse_documents):
@@ -581,19 +617,23 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
             if config:
                 opts["config"] = config
             job = s.crawl(url, idempotency_key=_key("crawl", url, opts), **opts)
-            # `pages()` waits for more while the crawl runs, for up to an hour
-            # by default. That is right down a pipe and wrong down a socket, so
-            # hosted mode gives it a budget and hands back the job id instead.
+            # Waited for first, then walked. `_walk` takes its cursor after the
+            # first PAGES_CAP rows, which is a batch boundary only when every
+            # batch comes back full -- on a finished crawl. Walked while it ran,
+            # a short first batch put the cursor past rows it had not read.
+            # The wait is up to an hour by default. That is right down a pipe
+            # and wrong down a socket, so hosted mode gives it a budget and
+            # hands back the job id instead.
             budget = _budget()
             if budget is None:
-                return _crawl_result(job, *_walk(job))
-            try:
-                pages, window = _walk(job, timeout=budget)
-            except MeshArcTimeoutError:
-                # The budget, not a failure: the crawl is still going, and
-                # `pages()` says so by raising once its deadline passes.
-                return _still_running("crawl", job.id, job.envelope.get("counts"))
-            return _crawl_result(job, pages, window)
+                job.wait()
+            else:
+                try:
+                    job.wait(timeout=budget)
+                except MeshArcTimeoutError:
+                    # The budget, not a failure: the crawl is still going.
+                    return _still_running("crawl", job.id, job.envelope.get("counts"))
+            return _crawl_result(job, *_walk(job, wait=False))
     return _safe(go)
 
 
@@ -732,7 +772,8 @@ def list_pages(project_id: str, run_id: str | None = None) -> dict:
     return _safe(go)
 
 
-@tool(description="One stored page in full: markdown, head fields, fields, and its versions across runs.")
+@tool(description="One stored page on its own -- each body up to 12,000 characters: markdown, head fields, "
+                         "fields, and its versions across runs.")
 def get_page(project_id: str, url: str, run_id: str | None = None) -> dict:
     return _safe(lambda: _trim_page(_client().page(project_id, url, run_id)))
 

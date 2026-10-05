@@ -314,3 +314,89 @@ def test_the_settings_guide_lists_every_tier_the_api_takes():
     assert "'auto'" in mcp_mod.CONFIG_GUIDE["max_tier"]
     for tier in ("http", "browser", "stealth"):
         assert f"'{tier}'" in mcp_mod.CONFIG_GUIDE["max_tier"]
+
+
+# --- crawl_site waits, then walks; a batch past its budget still accounts for every url ----
+
+class _Running(_Job):
+    """A crawl as the client sees it while it runs: the first poll finds `first`
+    rows, later ones the rest; each fetch replaces the envelope."""
+
+    def __init__(self, pages, first=12, finishes=True):
+        super().__init__(pages, envelope={"status": "running"})
+        self.first, self.finishes, self.waited = first, finishes, []
+
+    def wait(self, timeout=3600, **_kw):
+        self.waited.append(timeout)
+        if not self.finishes:
+            raise mcp_mod.MeshArcTimeoutError("still running", self.id)
+        self.envelope = {**self.envelope, "status": "done"}
+        return self.envelope
+
+    def pages(self, limit=25, wait=True, cursor=None, **_kw):
+        self.asked.append({"limit": limit, "wait": wait, "cursor": cursor})
+        pos, seen = int(cursor or 0), (len(self._pages) if not wait else self.first)
+        while pos < len(self._pages):
+            end = min(pos + limit, seen)
+            self.envelope = {**self.envelope, "cursor": str(end),
+                             "next": f"https://api.test/api/v1/crawl/c1?cursor={end}" if end < len(self._pages) and end - pos == limit else None}
+            yield from self._pages[pos:end]
+            pos = end
+            if pos >= seen:
+                if not wait:
+                    return
+                seen = len(self._pages)
+
+
+class _Starts:
+    def __init__(self, job):
+        self.job = job
+
+    def crawl(self, url, **_kw):
+        return self.job
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+
+@pytest.mark.parametrize("n", [60, 400])
+def test_crawl_site_waits_for_the_crawl_then_walks_it(monkeypatch, n):
+    """Walked while it ran, a first poll of twelve rows put the cursor past rows
+    the walk had not read (62 for a 400-page crawl, against "after the first 50"),
+    or past the end of a 60-page one. Waited for first, the walk is of a finished
+    crawl and every batch is whole."""
+    job = _Running([_page(i, links=1, chars=100) for i in range(n)])
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Starts(job))
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    out = mcp_mod.crawl_site("https://x.test/", limit=n)
+    assert job.waited and all(a["wait"] is False for a in job.asked)
+    assert out["status"] == "done"
+    assert out.get("cursor") in (None, str(mcp_mod.PAGES_CAP)), out.get("cursor")
+
+
+def test_hosted_crawl_site_hands_back_the_job_when_its_budget_runs_out(monkeypatch):
+    job = _Running([_page(0)], finishes=False)
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Starts(job))
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: 9.0)
+    out = mcp_mod.crawl_site("https://x.test/")
+    assert job.waited == [9.0] and out["status"] == "running" and out["job"] == {"kind": "crawl", "id": "c1"}
+
+
+def test_a_big_batch_accounts_for_every_url_inside_the_budget():
+    """The index kept 297 of 500 and dropped the rest without a word, and the
+    answer came to 60,051 against 60,000."""
+    def page(i):
+        return {"url": f"https://www.example-company.com/products/category-{i % 20}/item-name-number-{i}",
+                "head": {"title": f"Item name number {i} | Example Company - Products and Services"},
+                "words": 1234, "status": "blocked" if i in (300, 420) else "ok", "links": [{"href": "x"}] * 200,
+                "markdown": "w " * 10_000}
+    out = mcp_mod._batch_result({"id": "b1", "status": "done", "pages": [page(i) for i in range(500)]})
+    assert len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    rest = out["rest"]
+    assert rest["count"] + len(out["index"]) == 500
+    assert rest["byStatus"] == {"ok": rest["count"] - 2, "blocked": 2}
+    assert [r["url"].rsplit("-", 1)[1] for r in rest["notOk"]] == ["300", "420"]
+    assert "of 500 urls" in out["note"] and "credits" in out["note"]
