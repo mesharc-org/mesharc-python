@@ -39,9 +39,12 @@ import time
 import uuid
 from collections import OrderedDict
 from itertools import islice
+from typing import Annotated, Literal
 
 try:
     from mcp.server.mcpserver import MCPServer
+    from mcp.types import ToolAnnotations
+    from pydantic import Field
 except ImportError as exc:  # pragma: no cover
     raise SystemExit('The MCP server needs the "mcp" package: pip install "mesharc[mcp]"') from exc
 
@@ -91,6 +94,32 @@ INSTRUCTIONS = (
 # assistant has to pick a tool by, and re-registering without them would leave
 # seventeen nameless verbs.
 _TOOLS: "list[tuple]" = []
+
+# What each tool does to the world, in the hints MCP clients read. A tool that
+# only reads what the workspace has stored is safe to call freely; one that
+# reaches a site spends credits. The descriptions say the rest -- what it
+# costs, what comes back -- and must never contradict these.
+READS_STORED = ToolAnnotations(read_only_hint=True, destructive_hint=False,
+                               idempotent_hint=True, open_world_hint=False)
+
+
+def _acts(*, destructive=False, idempotent=False, open_world=True):
+    return ToolAnnotations(read_only_hint=False, destructive_hint=destructive,
+                           idempotent_hint=idempotent, open_world_hint=open_world)
+
+
+# The parameters most tools share, described once.
+ProjectId = Annotated[str, Field(description="The project's id, as list_projects or create_project returns it.")]
+RunId = Annotated[str | None, Field(
+    description="A run's id, from start_run or the runId a list_pages answer carries; "
+                "leave empty for the last finished run.")]
+Schedule = Literal["manual", "hourly", "daily", "weekly"]
+FetchConfig = Annotated[dict | None, Field(
+    description="Optional fetch settings: any subset of the keys describe_project_config lists, "
+                "e.g. {\"render_js\": \"always\", \"only_main_content\": true}. Omit for the defaults.")]
+ParseDocuments = Annotated[bool, Field(
+    description="Read PDFs, Word files and spreadsheets as text (default true); false leaves their text out. "
+                "A parse_documents key in config wins.")]
 
 
 def tool(**how):
@@ -560,12 +589,23 @@ def _safe(fn):
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-@tool(description="Scrape a list of URLs (up to 500) into markdown, no project needed. Waits for the batch. "
-                         "One URL is answered in the same request where the page is quick. PDFs, Word files and "
-                         "spreadsheets are read as text unless parse_documents is false. "
-                         "`config` is any subset of a project config, e.g. {\"formats\": [\"markdown\", \"text\"], \"concurrency\": 4, \"render_js\": \"always\"}.")
-def scrape_urls(urls: list[str], config: dict | None = None, formats: str = "markdown",
-                parse_documents: bool = True) -> dict:
+@tool(title="Scrape a list of URLs",
+      annotations=_acts(idempotent=True),
+      description="Fetch known URLs (1 to 500) once and return each page's content, markdown by default; no project "
+                  "is created. For one page with every format or browser steps use extract_url; to find pages by "
+                  "following links use crawl_site; to list a site's URLs without fetching them use map_site. "
+                  "Each page costs the credits of the engine that read it (1 plain fetch, 4 browser render), and a "
+                  "page the site refuses is free. A single URL answers in the same request; a list waits for the "
+                  "batch, and a large one comes back as an index with excerpts inside 60,000 characters. Hosted, a "
+                  "batch still going after the time budget comes back as a job for get_job, and repeating the same "
+                  "call returns that job instead of starting another.")
+def scrape_urls(urls: Annotated[list[str], Field(
+                    description="The pages to fetch: 1 to 500 absolute http(s) URLs.")],
+                config: FetchConfig = None,
+                formats: Annotated[str, Field(
+                    description="Comma-separated bodies to return per page, from markdown (default), text, "
+                                "cleanHtml and rawHtml, e.g. 'markdown,text'.")] = "markdown",
+                parse_documents: ParseDocuments = True) -> dict:
     def go():
         cfg = _with_documents(config, parse_documents)
         # A key of our own, so a retry -- the client's on a dropped
@@ -591,12 +631,21 @@ def scrape_urls(urls: list[str], config: dict | None = None, formats: str = "mar
     return _safe(go)
 
 
-@tool(description="Extract one URL with every format a project can produce (markdown, text, cleanHtml, "
-                         "json fields, screenshot), through the fetch ladder: plain http first, a browser only "
-                         "when needed or when render_js is 'always'. Browser `actions` (click, type, select, press, "
-                         "wait, scroll; a click with repeat 'until_gone' for Load-more buttons; `each` to click "
-                         "every match of a selector and run nested steps) run before the page is read.")
-def extract_url(url: str, config: dict | None = None, parse_documents: bool = True) -> dict:
+@tool(title="Extract one page in full",
+      annotations=_acts(),
+      description="Fetch one URL exactly as a project with the given settings would, and return the whole page: "
+                  "the bodies config's formats ask for plus the raw html (each capped at 12,000 characters), head "
+                  "and extracted fields, its images, and which engine read it -- without its link list. Use it "
+                  "for a single page that needs browser steps, structured fields or a settings trial before "
+                  "create_project; for plain content of one or many known URLs use scrape_urls, and get_page "
+                  "reads a page a project already stored without fetching. It climbs the fetch ladder -- plain "
+                  "http first, a browser only when the page needs one or render_js is 'always' -- and costs the "
+                  "credits of the rung that read it (1 to 4 for most pages, +1 when formats ask for a "
+                  "screenshot). Browser `actions` in config (click, type, select, press, wait, scroll; repeat "
+                  "'until_gone' for Load-more buttons; `each` to act on every match) run before the page is read.")
+def extract_url(url: Annotated[str, Field(description="The absolute http(s) URL of the page to read.")],
+                config: FetchConfig = None,
+                parse_documents: ParseDocuments = True) -> dict:
     def go():
         with _client() as s:
             r = s.extract(url, config=_with_documents(config, parse_documents))
@@ -607,11 +656,20 @@ def extract_url(url: str, config: dict | None = None, parse_documents: bool = Tr
     return _safe(go)
 
 
-@tool(description="Every URL a site declares in its sitemaps -- robots.txt, the well-known paths, and every "
-                         "index file walked to its children -- without fetching any of the pages. Cheap, and the right "
-                         "first step before crawling: it says how big a site is and what sections it has. `search` "
-                         "narrows to URLs containing a string.")
-def map_site(url: str, search: str | None = None, limit: int = 1000) -> dict:
+@tool(title="Map a site's declared URLs",
+      annotations=_acts(),
+      description="List every URL a site declares in its sitemaps -- found through robots.txt and the well-known "
+                  "paths, each index file walked to its children -- without fetching any of the pages. Use it "
+                  "first, to see how big a site is and what sections it has, before crawl_site or create_project; "
+                  "it cannot read page content (scrape_urls or crawl_site do) and misses pages a site links to but "
+                  "does not declare. Costs 1 credit per sitemap file read, usually 1 in total, never per URL. "
+                  "Returns the discovery method, totals, up to `limit` URLs and the section names.")
+def map_site(url: Annotated[str, Field(description="Any URL on the site, usually its home page.")],
+             search: Annotated[str | None, Field(
+                 description="Keep only URLs containing this text, e.g. '/blog/'; omit for all.")] = None,
+             limit: Annotated[int, Field(
+                 description="The most URLs to return, 1 to 5,000 (default 1,000); totals still count them all.")]
+             = 1000) -> dict:
     def go():
         with _client() as s:
             out = s.map_details(url, search=search, limit=min(limit, 5000))
@@ -621,15 +679,33 @@ def map_site(url: str, search: str | None = None, limit: int = 1000) -> dict:
     return _safe(go)
 
 
-@tool(description="Crawl a whole site once and return its pages -- no project needed. Follows links from the "
-                         "URL given, reads the sitemap, and stops at `limit` pages. Returns when the crawl finishes "
-                         "(minutes for a large limit): an index of the pages read and an excerpt of as many as a "
-                         "60,000-character answer holds; get_job reads any one page, or carries on with cursor=. "
-                         "`include_paths` and `exclude_paths` are globs over the URL path -- '/blog/*' for a section, "
-                         "'*.pdf' for documents; a bare '/blog/' matches only that one page. "
-                         "`crawl_id` in the result can be handed to keep_crawl_as_project.")
-def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: list[str] | None = None,
-               exclude_paths: list[str] | None = None, config: dict | None = None) -> dict:
+@tool(title="Crawl a whole site once",
+      annotations=_acts(idempotent=True),
+      description="Crawl a site once from a start URL -- following its links and reading its sitemap, up to "
+                  "`limit` pages -- and return what it found, without setting up a project. Use it to read a site "
+                  "or section whose page URLs you do not know; for known URLs use scrape_urls, and to watch a site "
+                  "over time use create_project (or keep_crawl_as_project on this crawl afterwards). Each page "
+                  "costs the credits of the engine that read it (usually 1 to 4) and refused pages are free. It "
+                  "waits for the crawl, minutes for a large limit; hosted, a crawl still going after the time "
+                  "budget comes back as a job for get_job, and repeating the call returns the same crawl. The "
+                  "answer is an index of the pages read plus excerpts inside 60,000 characters; get_job with "
+                  "`url` reads one page in full and with `cursor` the next window. The crawl is kept for a day; "
+                  "pass the result's crawl_id to keep_crawl_as_project to keep it for good.")
+def crawl_site(url: Annotated[str, Field(description="The absolute http(s) URL to start from, e.g. the home page.")],
+               limit: Annotated[int, Field(
+                   description="The most pages to read, 1 to 5,000 (default 50); the plan's page cap also applies.")]
+               = 50,
+               max_depth: Annotated[int, Field(
+                   description="How many links deep to follow from the start URL (0 = that page only; default 3).")]
+               = 3,
+               include_paths: Annotated[list[str] | None, Field(
+                   description="Globs over the URL path to keep, e.g. ['/blog/*'] for a section (its index "
+                               "included); a bare '/blog/' matches only that one page. Omit for the whole site.")]
+               = None,
+               exclude_paths: Annotated[list[str] | None, Field(
+                   description="Globs over the URL path to skip, e.g. ['/tag/*', '*.pdf']; an exclude wins over "
+                               "an include.")] = None,
+               config: FetchConfig = None) -> dict:
     def go():
         with _client() as s:
             opts = {"limit": min(limit, 5000), "maxDepth": max_depth}
@@ -662,17 +738,35 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
     return _safe(go)
 
 
-@tool(description="Keep a crawl from crawl_site as a project, so the site is watched over time and its changes "
-                         "are recorded. Nothing is re-fetched: the crawl's pages become the project's first run. "
-                         "schedule: manual | hourly | daily | weekly.")
-def keep_crawl_as_project(crawl_id: str, name: str | None = None, schedule: str = "manual") -> dict:
+@tool(title="Keep a crawl as a project",
+      annotations=_acts(open_world=False),
+      description="Turn a crawl_site crawl into a project, so the site is watched over time and each later run "
+                  "is compared against this one. Nothing is fetched again and it costs no credits: the crawl's "
+                  "pages become the project's first run. Use it after crawl_site when the site is worth watching; "
+                  "to start a watched site from scratch use create_project. Without it a crawl and its pages "
+                  "expire after a day. It counts toward the plan's project limit (refused with plan_limit when "
+                  "full). Returns the new project, whose id the other project tools take.")
+def keep_crawl_as_project(crawl_id: Annotated[str, Field(
+                              description="The crawl_id a crawl_site answer (or get_job on a crawl) returned.")],
+                          name: Annotated[str | None, Field(
+                              description="A name for the project; omit to keep the crawl's own name.")] = None,
+                          schedule: Annotated[Schedule, Field(
+                              description="How often the project re-crawls on its own; 'manual' (default) runs "
+                                          "only when start_run is called. Every run spends credits.")]
+                          = "manual") -> dict:
     def go():
         with _client() as s:
             return s.get_crawl(crawl_id).keep(name=name, schedule=schedule)
     return _safe(go)
 
 
-@tool(description="The workspace's projects: sites watched over time, with their last run's counts.")
+@tool(title="List all projects",
+      annotations=READS_STORED,
+      description="List every project in the workspace -- the sites it watches over time -- with each one's id, "
+                  "name, seed URL, host, schedule, page count, coverage, last run and health. Call it first to "
+                  "find a project_id for the other project tools, or to check whether a site is already watched "
+                  "before create_project; get_project gives one project's full settings. Reads only what is "
+                  "stored: free, and it fetches nothing. A key limited to some projects sees only those.")
 def list_projects() -> list | dict:
     return _safe(lambda: [{k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "pages", "coverage", "lastRun", "health")}
                           for p in _client().projects.list()])
@@ -725,9 +819,13 @@ CONFIG_GUIDE = {
 }
 
 
-@tool(description="Every project setting an assistant can set: name, meaning, and the default. Read this "
-                         "before create_project or update_project when the request names a section, a schedule, "
-                         "a format, a limit or a behaviour -- the keys are exact, guessed names are refused.")
+@tool(title="Describe project settings",
+      annotations=READS_STORED,
+      description="List the project settings an assistant can set -- each key with its meaning and its default "
+                  "-- plus the valid schedules and how path globs work. Read it before create_project, "
+                  "update_project or a `config` argument whenever the request names a section, schedule, format, "
+                  "limit or behaviour: keys are exact and guessed names are refused. It describes settings in "
+                  "general; get_project shows the values one project has. Free, and it fetches nothing.")
 def describe_project_config() -> dict:
     def go():
         with _client() as s:
@@ -741,22 +839,57 @@ def describe_project_config() -> dict:
     return _safe(go)
 
 
-@tool(description="One project with its settings, schedule and last run -- read it before changing it.")
-def get_project(project_id: str) -> dict:
+@tool(title="Get one project",
+      annotations=READS_STORED,
+      description="Read one project in full: its settings (config), schedule, retention, coverage and last run. "
+                  "Read it before update_project, to see the values you are about to change; list_projects is "
+                  "the lighter way to find projects, and list_pages or get_changes read what its runs found. "
+                  "Free, fetches nothing; an unknown or hidden project answers 404. The webhook signing secret "
+                  "is withheld from the answer.")
+def get_project(project_id: ProjectId) -> dict:
     return _safe(lambda: _client().projects.get(project_id))
 
 
-@tool(description="Create a project for a site (seed URL) so it is crawled on a schedule and its changes recorded. "
-                         "`config` is any subset of the settings describe_project_config lists -- for one section of "
-                         "a site pass include_paths (globs), e.g. {\"include_paths\": [\"/blog/*\"]}; map_site first "
-                         "shows how the site is laid out. schedule: manual | hourly | daily | weekly.")
-def create_project(seed: str, name: str | None = None, schedule: str = "manual", config: dict | None = None) -> dict:
+@tool(title="Create a watched project",
+      annotations=_acts(),
+      description="Create a project that watches a site over time: it is crawled on its schedule and each run is "
+                  "compared with the last, recording pages added, modified and removed. Use it when the request "
+                  "is to monitor or track a site; for a one-off read use crawl_site (keep_crawl_as_project can "
+                  "turn that into a project later), and check list_projects first so the site is not added "
+                  "twice. Creating it reads the site's robots.txt and sitemaps but fetches no pages; every run "
+                  "then spends credits per page. Refused when the plan's project limit is reached. Returns the "
+                  "project, whose id start_run takes to crawl it now.")
+def create_project(seed: Annotated[str, Field(
+                       description="Where the crawl starts: a public site's URL or bare domain, e.g. "
+                                   "'https://example.com/blog/' or 'example.com'. The project covers that host.")],
+                   name: Annotated[str | None, Field(
+                       description="A name for the project; omit to use the site's host name.")] = None,
+                   schedule: Annotated[Schedule, Field(
+                       description="How often it re-crawls on its own; 'manual' (default) runs only when "
+                                   "start_run is called.")] = "manual",
+                   config: Annotated[dict | None, Field(
+                       description="Any subset of the settings describe_project_config lists. For one section "
+                                   "of a site pass include_paths, e.g. {\"include_paths\": [\"/blog/*\"]}; "
+                                   "map_site shows the site's sections first. Omit for the defaults.")]
+                   = None) -> dict:
     return _safe(lambda: _client().projects.create(seed, name=name, schedule=schedule, config=config))
 
 
-@tool(description="Change a project: its name, schedule, or any settings in `config` (only the keys given "
-                         "change; the rest stay). The next run uses the new settings.")
-def update_project(project_id: str, name: str | None = None, schedule: str | None = None, config: dict | None = None) -> dict:
+@tool(title="Update a project's settings",
+      annotations=_acts(destructive=True, idempotent=True, open_world=False),
+      description="Change an existing project's name, schedule or settings. Only what you pass changes: in "
+                  "`config` only the keys given are replaced, the rest stay; a replaced value is not kept. Call "
+                  "get_project first to see the current values, and describe_project_config for valid keys; to "
+                  "start a different site use create_project instead. Nothing is fetched and no credits are "
+                  "spent now; the next run uses the new settings, and a settings change that alters how pages "
+                  "are read starts a fresh comparison baseline. Returns the updated project.")
+def update_project(project_id: ProjectId,
+                   name: Annotated[str | None, Field(description="A new name; omit to leave it.")] = None,
+                   schedule: Annotated[Schedule | None, Field(
+                       description="A new schedule; omit to leave it.")] = None,
+                   config: Annotated[dict | None, Field(
+                       description="Settings to change, e.g. {\"max_pages\": 200}; keys not given keep their "
+                                   "values. Omit to leave them all.")] = None) -> dict:
     def go():
         fields: dict = {}
         if name is not None:
@@ -772,9 +905,22 @@ def update_project(project_id: str, name: str | None = None, schedule: str | Non
     return _safe(go)
 
 
-@tool(description="Start a crawl of a project now. With wait=true, returns the finished run; hosted, a run "
-                         "still going after a few seconds comes back as a job to follow with get_job.")
-def start_run(project_id: str, wait: bool = False) -> dict:
+@tool(title="Start a project run now",
+      annotations=_acts(),
+      description="Crawl a project's site now with its saved settings, outside its schedule; the run is then "
+                  "compared with the last one. Use it after create_project or update_project, or when fresh "
+                  "results are wanted; to re-read only a few pages use recrawl_pages, and for a site with no "
+                  "project use crawl_site. Every page read costs credits (usually 1 to 4) and a run stops when "
+                  "the credit budget runs out, keeping what it read; it is refused with 409 while a run of the "
+                  "project is already queued or running, and 402 when no credits are left. Without wait it "
+                  "returns the queued run at once; with wait it returns the finished run, except hosted, where "
+                  "a run still going after "
+                  "the time budget comes back as a job for get_job. Results are read with list_pages and "
+                  "get_changes.")
+def start_run(project_id: ProjectId,
+              wait: Annotated[bool, Field(
+                  description="true waits for the run to finish (minutes for a large site); false (default) "
+                              "returns as soon as it is queued.")] = False) -> dict:
     def go():
         s = _client()
         budget = _budget()
@@ -788,8 +934,15 @@ def start_run(project_id: str, wait: bool = False) -> dict:
     return _safe(go)
 
 
-@tool(description="The pages of a project's last finished run (or run_id): url, status, depth, words, when changed.")
-def list_pages(project_id: str, run_id: str | None = None) -> dict:
+@tool(title="List a run's pages",
+      annotations=READS_STORED,
+      description="List the pages one project run stored -- the last finished run unless run_id is given -- "
+                  "with each page's url, status, depth, word count and when it last changed, up to 500 rows, "
+                  "plus the runId. Use it to see what a crawl covered or to pick a URL; get_page reads one of "
+                  "them in full, search_pages finds pages by their text, and get_changes lists only what "
+                  "changed. Free and reads only what is stored: it never fetches the site. A project with no "
+                  "finished run answers with no pages.")
+def list_pages(project_id: ProjectId, run_id: RunId = None) -> dict:
     def go():
         r = _client().pages(project_id, run_id)
         r["pages"] = r.get("pages", [])[:500]
@@ -797,15 +950,35 @@ def list_pages(project_id: str, run_id: str | None = None) -> dict:
     return _safe(go)
 
 
-@tool(description="One stored page on its own -- each body up to 12,000 characters: markdown, head fields, "
-                         "fields, and its versions across runs.")
-def get_page(project_id: str, url: str, run_id: str | None = None) -> dict:
+@tool(title="Get one stored page",
+      annotations=READS_STORED,
+      description="Read one page a project run stored, in full: its markdown and other bodies (each capped at "
+                  "12,000 characters), head fields (title, description, canonical, h1), extracted fields, and "
+                  "its versions across runs. Use it when you know the page's URL; list_pages or search_pages "
+                  "finds the URL first, and for a page from a crawl_site crawl use get_job with url instead. "
+                  "Free and reads only what is stored, so it never fetches the site -- use extract_url for a "
+                  "live copy. A URL the run did not store answers 404.")
+def get_page(project_id: ProjectId,
+             url: Annotated[str, Field(
+                 description="The page's full URL as list_pages or search_pages shows it; the other scheme or "
+                             "trailing slash is matched too.")],
+             run_id: Annotated[str | None, Field(
+                 description="A run's id, from start_run or a list_pages answer, to read that run's copy; leave "
+                             "empty for the newest copy across the project's recent runs.")] = None) -> dict:
     return _safe(lambda: _trim_page(_client().page(project_id, url, run_id)))
 
 
-@tool(description="What changed in a project's last run against the run before it: pages added, modified, "
-                         "removed (withheld when the crawl reached under 90% of the site), and head-field changes.")
-def get_changes(project_id: str, run_id: str | None = None) -> dict:
+@tool(title="Get what changed in a run",
+      annotations=READS_STORED,
+      description="Report what changed in a project run against the run before it -- the last finished run "
+                  "unless run_id is given: pages added, modified and removed, head-field changes (title, "
+                  "description, canonical...), and the run's coverage, with up to 200 entries per list plus the "
+                  "runs a record exists for. Use it to answer 'what changed on the site'; list_pages shows every "
+                  "page whatever changed, and get_page shows one page's text and versions. Removals are withheld "
+                  "when the crawl reached under 90% of the site, so a blocked crawl never reports the site as "
+                  "gone. A project's first run is a baseline with nothing to compare. Free and reads only what "
+                  "is stored.")
+def get_changes(project_id: ProjectId, run_id: RunId = None) -> dict:
     def go():
         r = _client().changes(project_id, run_id)
         ch = r.get("change") or {}
@@ -816,24 +989,65 @@ def get_changes(project_id: str, run_id: str | None = None) -> dict:
     return _safe(go)
 
 
-@tool(description="Search inside a project's run. mode 'content': every word must appear, \"quoted phrases\" as written, "
-                         "over the extracted markdown. mode 'selector': a CSS selector or XPath (starting with / or () over the stored html.")
-def search_pages(project_id: str, q: str, mode: str = "content", run_id: str | None = None) -> dict:
+@tool(title="Search a run's stored pages",
+      annotations=READS_STORED,
+      description="Find which pages of a project run contain some text or an element -- the last finished run "
+                  "unless run_id is given -- returning the matching URLs with how many pages were scanned. Use "
+                  "it to locate pages by what they say or contain; list_pages lists every page and get_page "
+                  "then reads one in full. It scans the stored copies and never fetches the site, so it is free "
+                  "and as fresh as the run. A selector search needs the run to have kept html (the rawHtml "
+                  "format); when none was kept the answer says so rather than reporting no matches.")
+def search_pages(project_id: ProjectId,
+                 q: Annotated[str, Field(
+                     description="What to look for, 1 to 200 characters. In content mode every word must "
+                                 "appear and \"quoted phrases\" match as written; in selector mode a CSS "
+                                 "selector, or an XPath starting with / or (.")],
+                 mode: Annotated[Literal["content", "selector"], Field(
+                     description="'content' (default) searches the extracted markdown; 'selector' searches the "
+                                 "stored html.")] = "content",
+                 run_id: RunId = None) -> dict:
     return _safe(lambda: _client().search(project_id, q, mode=mode, run_id=run_id))
 
 
-@tool(description="Fetch listed pages of a project again now, as a run of their own compared against the last full run.")
-def recrawl_pages(project_id: str, urls: list[str]) -> dict:
+@tool(title="Re-crawl chosen pages",
+      annotations=_acts(),
+      description="Fetch specific pages of a project again now, as a small run of their own whose record "
+                  "compares just those pages with the last full run. Use it to check a few pages you expect "
+                  "changed without crawling the whole site; start_run re-crawls everything, and extract_url "
+                  "reads a page outside any project. Each page costs credits (usually 1 to 4). The URLs must be "
+                  "on the project's site; refused with 409 while another run of the project is queued or "
+                  "running. Returns the queued run; follow it with get_job (kind 'run') and read results with "
+                  "get_changes.")
+def recrawl_pages(project_id: ProjectId,
+                  urls: Annotated[list[str], Field(
+                      description="1 to 500 full URLs on the project's site to fetch again.")]) -> dict:
     return _safe(lambda: _client().recrawl(project_id, urls))
 
 
-@tool(description="Follow a job a long tool handed back: a crawl from crawl_site, a run from start_run, or a "
-                         "batch from scrape_urls. Returns its status and counts, and once it has finished, the same "
-                         "result the original tool would have given. kind: crawl | run | batch. A run needs its "
-                         "project_id. For a crawl, `url` returns that one page in full instead of the excerpts, and "
-                         "`cursor` (from the crawl result) returns the next window of pages. Costs nothing.")
-def get_job(kind: str, id: str, project_id: str | None = None,
-            url: str | None = None, cursor: str | None = None) -> dict:
+@tool(title="Follow a long-running job",
+      annotations=READS_STORED,
+      description="Check on a job a long tool handed back -- a crawl from crawl_site, a run from start_run or "
+                  "recrawl_pages, or a batch from scrape_urls -- and, once it has finished, return the same "
+                  "result the original tool would have given; while it is still going, its status and counts. "
+                  "Call it when a tool answered with status 'running' and a job; calling the original tool "
+                  "again is not needed and would not start a second job. For a crawl it is also how to read "
+                  "further: `url` returns one page in full (even mid-crawl) and `cursor` the next window of "
+                  "pages. For a project's stored pages use get_page instead. Free: it only reads stored "
+                  "results and never fetches.")
+def get_job(kind: Annotated[Literal["crawl", "run", "batch"], Field(
+                description="What the job is: 'crawl' (crawl_site), 'run' (start_run, recrawl_pages) or "
+                            "'batch' (scrape_urls); the 'job' object a tool returned names it.")],
+            id: Annotated[str, Field(
+                description="The job's id, from that 'job' object, or a crawl_site answer's crawl_id.")],
+            project_id: Annotated[str | None, Field(
+                description="Required for a run: the project it belongs to (the 'job' object carries it). "
+                            "Ignored for a crawl or a batch.")] = None,
+            url: Annotated[str | None, Field(
+                description="Crawls only: one page's URL from the crawl's index, to read that page in full.")]
+            = None,
+            cursor: Annotated[str | None, Field(
+                description="Crawls only: the cursor a previous crawl answer returned, to read the next "
+                            "window of pages.")] = None) -> dict:
     """The other half of a bounded wait, and the way into a large crawl.
 
     A tool that stopped waiting has to leave something to come back to, and

@@ -6,6 +6,20 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.3.2 - unreleased
+
+### Changed
+
+- **Every MCP tool now says what an assistant needs to choose and call it.** An assistant picks a tool from its definition alone, and no parameter of the seventeen tools had a description; directories that grade definitions (Glama's Tool Definition Quality Score) graded the tools C. Each tool now has:
+  - a title;
+  - a description of what it does, when to use it, and which sibling to use instead;
+  - what it costs in credits and what comes back;
+  - its refusals (404, 409 while a run is going, the plan's project limit).
+  
+  Every parameter is described: where an id comes from, what leaving it empty means, the valid range.
+- **Each tool declares the MCP hints** `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`, so a client can tell the eight tools that only read what the workspace stored from the nine that reach a site or change the workspace. `update_project` is the only one marked destructive, because it replaces values.
+- **Fixed choices are enums in the schema**: `get_job`'s `kind` (crawl, run, batch), `search_pages`'s `mode` (content, selector), and `schedule` (manual, hourly, daily, weekly). Behaviour is otherwise unchanged. A value outside these is now refused by the server before the call, where it used to be refused by the API (or, for `kind`, by `get_job` itself).
+
 ## 0.3.1 - 2026-10-06
 
 ### Fixed

@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl"]
 
 DEFAULT_BASE = "https://api.mesharc.dev"
