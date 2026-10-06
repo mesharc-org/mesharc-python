@@ -24,7 +24,8 @@ the call, so one process serves many workspaces without any of them reaching
 another's. `MESHARC_API_KEY` is never read there -- see `_client`.
 
 Tools return the API's JSON, trimmed where a body would swamp a context window
-(markdown is capped per page; ask for one page to get all of it). Every tool is
+(a multi-page answer is an index with excerpts inside 60,000 characters; one
+page asked for on its own comes back with each body capped at 12,000). Every tool is
 a call through the Python client, so what the agent gets is what the API gives.
 A tool that would otherwise hold a connection open for minutes hands back a job
 instead, for `get_job` to follow.
@@ -283,7 +284,7 @@ def _excerpts(rows, how, reserve=0):
     """
     budget = max(MIN_EXCERPTS * EXCERPT_FLOOR, RESULT_BUDGET - reserve)
     index = [_index_row(p) for p in rows]
-    floor_cost = MIN_EXCERPTS * EXCERPT_FLOOR
+    floor_cost = MIN_EXCERPTS * EXCERPT_FLOOR + _cost([_summary_page(p, 0, how) for p in rows[:MIN_EXCERPTS]])
     while len(index) > MIN_EXCERPTS and _cost(index) + floor_cost > budget:
         index = index[:max(MIN_EXCERPTS, len(index) - max(1, len(index) // 10))]
     spent = _cost(index)
@@ -315,7 +316,7 @@ def _still_running(kind, job_id, counts=None, project_id=None):
             "note": "call get_job with this job to check; it keeps running server-side"}
 
 
-def _walk(job, **how):
+def _walk(job, deadline=None, **how):
     """Up to `INDEX_CAP` pages, and the cursor the next window starts at.
 
     Two slices of one generator rather than one slice of a list. `pages()`
@@ -329,7 +330,18 @@ def _walk(job, **how):
     walk = job.pages(limit=PAGES_CAP, **how)
     first = list(islice(walk, PAGES_CAP))
     tail = (job.envelope.get("cursor") or "") if len(first) == PAGES_CAP else ""
-    return first + list(islice(walk, max(0, INDEX_CAP - PAGES_CAP))), tail
+    rows = list(first)
+    # The rest a batch at a time, so a hosted `deadline` stops the walk on a
+    # batch boundary: what was read is whole, and the cursor still resumes
+    # after the first batch. Hosted, the budget covers this as well as the wait.
+    while len(first) == PAGES_CAP and len(rows) < INDEX_CAP:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        batch = list(islice(walk, min(PAGES_CAP, INDEX_CAP - len(rows))))
+        rows.extend(batch)
+        if len(batch) < PAGES_CAP:
+            break
+    return rows, tail
 
 
 def _crawl_result(job, pages, window=""):
@@ -400,6 +412,15 @@ def _batch_result(b):
     """
     rows = [p for p in b.get("pages", []) if isinstance(p, dict)][:INDEX_CAP]
     base = {k: v for k, v in b.items() if k != "pages"}
+    if isinstance(base.get("runs"), list):
+        # One run per url on a small host: five hundred of them came to seventy
+        # thousand characters before a page was shown, and every page row
+        # already says how it went. A count by status is what is left of them.
+        by_status: dict = {}
+        for r in base["runs"]:
+            if isinstance(r, dict):
+                by_status[str(r.get("status"))] = by_status.get(str(r.get("status")), 0) + 1
+        base["runs"] = {"count": len(base["runs"]), "byStatus": by_status}
     # Built, weighed, and rebuilt with the overshoot reserved, as a crawl is.
     reserve, out = 0, None
     for _attempt in range(4):
@@ -431,9 +452,10 @@ def _shape_batch(base, rows, reserve):
                     break
                 not_ok.append(row)
         out["rest"] = {"count": len(rest), "byStatus": by_status, "notOk": not_ok}
-        out["note"] = (f"the index lists the first {kept} of {len(rows)} urls; `rest` counts the others by "
-                       "status and names those that did not come back ok. extract_url reads one again, "
-                       "and spends credits doing it")
+        out["note"] = ". ".join(n for n in (base.get("note"), (
+            f"the index lists the first {kept} of {len(rows)} urls; `rest` counts the others by "
+            "status and names those that did not come back ok. extract_url reads one again, "
+            "and spends credits doing it")) if n)
     return out
 
 
@@ -601,7 +623,8 @@ def map_site(url: str, search: str | None = None, limit: int = 1000) -> dict:
 
 @tool(description="Crawl a whole site once and return its pages -- no project needed. Follows links from the "
                          "URL given, reads the sitemap, and stops at `limit` pages. Returns when the crawl finishes "
-                         "(minutes for a large limit); the pages come back with markdown, capped per page. "
+                         "(minutes for a large limit): an index of the pages read and an excerpt of as many as a "
+                         "60,000-character answer holds; get_job reads any one page, or carries on with cursor=. "
                          "`include_paths` and `exclude_paths` are globs over the URL path -- '/blog/*' for a section, "
                          "'*.pdf' for documents; a bare '/blog/' matches only that one page. "
                          "`crawl_id` in the result can be handed to keep_crawl_as_project.")
@@ -625,15 +648,17 @@ def crawl_site(url: str, limit: int = 50, max_depth: int = 3, include_paths: lis
             # and wrong down a socket, so hosted mode gives it a budget and
             # hands back the job id instead.
             budget = _budget()
-            if budget is None:
-                job.wait()
-            else:
-                try:
+            deadline = None if budget is None else time.monotonic() + budget
+            try:
+                if budget is None:
+                    job.wait()
+                else:
                     job.wait(timeout=budget)
-                except MeshArcTimeoutError:
-                    # The budget, not a failure: the crawl is still going.
-                    return _still_running("crawl", job.id, job.envelope.get("counts"))
-            return _crawl_result(job, *_walk(job, wait=False))
+            except MeshArcTimeoutError:
+                # The budget -- or, down a pipe, the hour -- not a failure: the
+                # crawl is still going, and get_job picks it up by this id.
+                return _still_running("crawl", job.id, job.envelope.get("counts"))
+            return _crawl_result(job, *_walk(job, deadline=deadline, wait=False))
     return _safe(go)
 
 
@@ -837,7 +862,9 @@ def get_job(kind: str, id: str, project_id: str | None = None,
                 return _still_running("crawl", id, job.envelope.get("counts"))
             # Finished, however it finished -- `error` and `cancelled` included.
             # An assistant has to be told a crawl failed, not kept polling.
-            pages, window = _walk(job, wait=False, cursor=cursor)
+            budget = _budget()
+            pages, window = _walk(job, deadline=None if budget is None else time.monotonic() + budget,
+                                  wait=False, cursor=cursor)
             return _crawl_result(job, pages, window)
         if kind == "run":
             if not project_id:

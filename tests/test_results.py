@@ -400,3 +400,58 @@ def test_a_big_batch_accounts_for_every_url_inside_the_budget():
     assert rest["byStatus"] == {"ok": rest["count"] - 2, "blocked": 2}
     assert [r["url"].rsplit("-", 1)[1] for r in rest["notOk"]] == ["300", "420"]
     assert "of 500 urls" in out["note"] and "credits" in out["note"]
+
+
+def test_hosted_the_walk_after_the_wait_is_bounded_too(monkeypatch):
+    """The budget covered the wait and not the walk after it: past the deadline
+    the walk now stops at a batch boundary, with the cursor still after the first."""
+    clock = iter([0.0, 0.0, 5.0, 30.0, 30.0, 30.0, 30.0])
+    monkeypatch.setattr(mcp_mod.time, "monotonic", lambda: next(clock))
+    job = _Running([_page(i, links=1, chars=100) for i in range(400)])
+    rows, tail = mcp_mod._walk(job, deadline=25.0, wait=False)
+    assert len(rows) % mcp_mod.PAGES_CAP == 0 and mcp_mod.PAGES_CAP <= len(rows) < 400
+    assert tail == str(mcp_mod.PAGES_CAP)
+    rows, tail = mcp_mod._walk(_Running([_page(i, links=1, chars=100) for i in range(400)]), wait=False)
+    assert len(rows) == 400, "without a deadline the walk reads to INDEX_CAP as before"
+
+
+def test_a_batch_keeps_a_note_of_its_own():
+    b = {"id": "b1", "status": "done", "note": "the API's own word",
+         "pages": [{"url": f"https://www.example-company.com/products/item-name-number-{i}",
+                    "head": {"title": f"Item name number {i} | Example Company - Products and Services"},
+                    "words": 1234, "status": "ok", "markdown": "w " * 10_000} for i in range(500)]}
+    out = mcp_mod._batch_result(b)
+    assert out["note"].startswith("the API's own word. ") and "rest" in out
+
+
+def test_a_batch_over_many_hosts_keeps_the_budget():
+    """One run per url on a small host: 500 runs were 70,300 characters before a
+    page was shown, and the answer came to 73,821."""
+    pages = [{"url": f"https://host-{i // 5}.example.com/products/item-{i}", "head": {"title": f"Item {i}"},
+              "words": 900, "status": "ok", "markdown": "w " * 5_000} for i in range(500)]
+    runs = [{"id": f"{i:032x}", "host": f"host-{i // 5}.example.com", "status": "done", "done": 1, "total": 1,
+             "stop": "no more pages to crawl"} for i in range(500)]
+    out = mcp_mod._batch_result({"id": "b1", "status": "done", "runs": runs, "pages": pages})
+    assert len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert out["runs"] == {"count": 500, "byStatus": {"done": 500}}
+    assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS
+
+
+def test_a_local_crawl_that_outlasts_the_wait_hands_back_its_job(monkeypatch):
+    job = _Running([_page(0)], finishes=False)
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Starts(job))
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    out = mcp_mod.crawl_site("https://x.test/")
+    assert out["status"] == "running" and out["job"] == {"kind": "crawl", "id": "c1"}
+
+
+def test_long_urls_still_leave_room_for_five_excerpts():
+    """Five summaries cost more than their bodies once urls and titles are long:
+    the index left room for 5 x 600 and the excerpts came out at four."""
+    def page(i):
+        return {"url": "https://www.example-company.com/" + "segment/" * 34 + f"item-{i}",
+                "head": {"title": "A long product title " * 10 + str(i)}, "words": 1234, "status": "ok",
+                "markdown": "w " * 10_000}
+    job = _Job([page(i) for i in range(500)])
+    out = mcp_mod._crawl_result(job, job.pages())
+    assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS and len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
