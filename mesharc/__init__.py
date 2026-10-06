@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl"]
 
 DEFAULT_BASE = "https://api.mesharc.dev"
@@ -278,14 +278,16 @@ class Crawl:
             self._h.pace()
 
     def pages(self, formats: str = "markdown", limit: int = 25, wait: bool = True, poll: float = 3.0,
-              timeout: float = 3600) -> Iterator[Json]:
+              timeout: float = 3600, cursor: Optional[str] = None) -> Iterator[Json]:
         """Every page of the crawl, oldest first.
 
         While the crawl runs this waits for more pages rather than
         stopping; ``wait=False`` yields what exists and returns.
+        ``cursor`` resumes from where an earlier walk stopped, which is what
+        a caller that read the first few hundred pages and wants the rest
+        asks with -- the value is the one the API's ``next`` link carries.
         """
         deadline = time.time() + timeout
-        cursor: Optional[str] = None
         while True:
             params: Dict[str, Any] = {"formats": formats, "limit": limit}
             if cursor:
@@ -305,6 +307,15 @@ class Crawl:
                 raise MeshArcTimeoutError(f"crawl {self.id} is still {page['status']} after {timeout}s", self.id)
             time.sleep(poll)
             self._h.pace()
+
+    def page(self, url: str) -> Json:
+        """One page of this crawl in full: markdown, html, head, fields.
+
+        ``pages()`` is how you walk the crawl; this is how you come back for
+        the whole of a single page once you know which one you want. The URL
+        is matched under either scheme and with or without a trailing slash.
+        """
+        return self._h("GET", f"/crawl/{self.id}/page", params={"url": url})
 
     def keep(self, name: Optional[str] = None, schedule: Optional[str] = None,
              retention: Optional[str] = None) -> Json:

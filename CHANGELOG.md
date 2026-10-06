@@ -6,6 +6,27 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.3.1 - 2026-10-06
+
+### Fixed
+
+- **A multi-page result is no longer unloadable.** A finished 200-page crawl came back as 2.2 million characters: every outbound link of every page was passed through untouched -- 1.19 MB of it, more than all the markdown put together -- and the 12,000-character body cap applied to each of the fifty pages returned. Clients refused to load it, and no context window would have held it. A crawl or multi-URL scrape now answers with an index of the pages read (`url`, `title`, `words`, `status`, up to 500 rows; hosted, the walk also stops when `MESHARC_MCP_WAIT` runs out), an excerpt of the first fifty, and a link *count* in place of each link list. The whole answer is budgeted at 60,000 characters rather than each page at 12,000, and the budget is kept: the index is paid for first, then as many excerpts as the rest will pay for above a 600-character floor -- fewer excerpts as a crawl grows, not thinner ones, which is what let a 500-page crawl out at 101,399 characters in an earlier draft of this release.
+- `crawl_site` waits for the crawl to finish before walking it. Walked while it ran, a short first batch put the cursor past rows the walk had not read.
+- A multi-URL scrape past its budget no longer drops urls without a word: the index lists what fits, and `rest` counts the others by status and names those that did not come back ok. It is weighed like a crawl, with its per-url run list summarised as a count by status, so it keeps to 60,000 characters too.
+- Single-page tools are unchanged and are how you read anything in full: `extract_url`, `get_page`, and `scrape_urls` with one URL still return the whole page at the 12,000-character cap.
+- A project's webhook signing secret no longer reaches an assistant. The API returns `webhookSecret` with a project, which is right for a program that will verify signatures with it, and wrong for a tool answer that passes through an AI app into a model's context. It is dropped in the one place every tool's answer goes through, replaced by `webhookSecretNote` saying where to see it, so a tool added later cannot leak it either. The API and the SDK still return it.
+
+### Added
+
+- `get_job(kind, id, project_id=None, url=None, cursor=None)`. `url` returns one page of a crawl on its own, each body up to 12,000 characters -- readable while the crawl is still running, because a page that has been crawled is stored -- and drops its link list. `cursor`, from the crawl result, returns the next window of pages.
+- `Crawl.page(url)` (`GET /crawl/{id}/page`), the API route behind that. The URL matches under either scheme and with or without a trailing slash. **This needs an API that has the route**: 0.3.1 requires the Seam-be deploy that added it.
+- `Crawl.pages(..., cursor=...)` resumes a page walk from where an earlier one stopped instead of starting at the top.
+
+### Changed
+
+- `describe_project_config` lists `max_tier: 'auto'` (as high as the plan allows), which the API accepts and the guide left out -- so an assistant reading the guide would never set it.
+- A tool refused for want of scope now says so. Hosted, a read-only connection asking for anything that fetches or writes got the API's `this needs the member role` -- true, and nothing an assistant can act on, since it does not know what a role is or that the person who approved the connection chose it. It now answers `{"code": "read_only"}` explaining that read-only covers what the workspace has stored but not fetching a new page -- those tools reach the site or alter the workspace, and most of them spend credits -- and that reconnecting with write access is the fix. The API's own words are kept under `detail`, the other 403s (suspended, email_unverified, mfa_required) are untouched, and stdio passes the API's answer through because it cannot see its key's scopes.
+
 ## 0.3.0 - 2026-09-30
 
 ### Added
