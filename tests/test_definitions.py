@@ -1,0 +1,67 @@
+"""What an assistant reads before it calls a tool.
+
+A tool is chosen and filled in from its definition alone: the description, the
+parameters' descriptions and the hints on what it does to the world. Every
+parameter went undescribed until 0.3.2, and directories that grade
+definitions marked the whole server down for it. These keep it from
+drifting back.
+"""
+import asyncio
+
+import pytest
+
+mcp_mod = pytest.importorskip("mesharc.mcp", reason="needs the mcp extra")
+
+# The tools that only read what the workspace has stored. Everything else
+# reaches a site or changes the workspace, and a read-only connection is
+# refused it -- the same nine the read_only answer is about.
+READ_ONLY = {"list_projects", "describe_project_config", "get_project", "list_pages",
+             "get_page", "get_changes", "search_pages", "get_job"}
+
+
+def _tools():
+    return {t.name: t for t in asyncio.run(mcp_mod.server.list_tools())}
+
+
+def test_all_seventeen_are_listed():
+    assert len(_tools()) == 17
+
+
+def test_every_parameter_is_described():
+    for name, t in _tools().items():
+        for param, schema in (t.input_schema.get("properties") or {}).items():
+            assert (schema.get("description") or "").strip(), f"{name}.{param} has no description"
+
+
+def test_every_tool_has_a_title_and_a_description():
+    for name, t in _tools().items():
+        assert t.title and t.title != name and len(t.title) > len(name), name
+        assert len((t.description or "").split()) >= 20, name
+
+
+def test_the_hints_say_which_tools_only_read():
+    for name, t in _tools().items():
+        a = t.annotations
+        assert a is not None, name
+        assert a.read_only_hint is (name in READ_ONLY), name
+        if name in READ_ONLY:
+            assert a.destructive_hint is False and a.open_world_hint is False, name
+
+
+def test_only_update_project_overwrites():
+    destructive = {n for n, t in _tools().items() if t.annotations.destructive_hint}
+    assert destructive == {"update_project"}
+
+
+def test_fixed_choices_are_listed():
+    tools = _tools()
+
+    def enum(tool, param):
+        schema = tools[tool].input_schema["properties"][param]
+        options = [schema] + list(schema.get("anyOf") or [])
+        return next(o["enum"] for o in options if "enum" in o)
+
+    assert enum("get_job", "kind") == ["crawl", "run", "batch"]
+    assert enum("search_pages", "mode") == ["content", "selector"]
+    for tool in ("create_project", "keep_crawl_as_project", "update_project"):
+        assert enum(tool, "schedule") == ["manual", "hourly", "daily", "weekly"]
