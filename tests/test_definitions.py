@@ -14,14 +14,14 @@ mcp_mod = pytest.importorskip("mesharc.mcp", reason="needs the mcp extra")
 
 # Every tool the server offers. Adding one is a line here, not a count to
 # find and bump.
-EXPECTED = {"scrape_urls", "map_site", "crawl_site", "web_search", "list_projects", "get_project",
-            "create_project", "update_project", "delete_project", "list_runs", "list_pages", "get_page",
+EXPECTED = {"scrape_urls", "map_site", "crawl_site", "search_web", "list_projects", "get_project",
+            "create_project", "update_project", "delete_project", "list_runs", "list_pages",
             "get_changes", "start_run", "get_job", "cancel_job"}
 
 # The tools that only read what the workspace has stored. Everything else
 # reaches a site or changes the workspace, and a read-only connection is
-# refused it -- the same seven the read_only answer is about.
-READ_ONLY = {"list_projects", "get_project", "list_runs", "list_pages", "get_page", "get_changes", "get_job"}
+# refused it -- the same six the read_only answer is about.
+READ_ONLY = {"list_projects", "get_project", "list_runs", "list_pages", "get_changes", "get_job"}
 
 
 def _tools():
@@ -30,7 +30,8 @@ def _tools():
 
 def test_every_tool_is_listed():
     # 0.4.0 folded five tools into the siblings they overlapped and added
-    # delete_project, nineteen becoming fifteen; web_search makes sixteen.
+    # delete_project, nineteen becoming fifteen; web search made sixteen in
+    # 0.5.0, and 0.6.0 folded get_page into list_pages(url=) for fifteen.
     assert set(_tools()) == EXPECTED
     assert READ_ONLY < EXPECTED
 

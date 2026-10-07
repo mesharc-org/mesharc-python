@@ -515,7 +515,7 @@ def test_ten_scraped_results_stay_inside_the_budget(monkeypatch):
     arc = _Searches(_search(hits=[_hit(i, _page(i)) for i in range(10)]))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
     monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
-    out = mcp_mod.web_search("q", scrape=True)
+    out = mcp_mod.search_web("q", scrape=True)
     size = len(json.dumps(out))
     assert size <= mcp_mod.RESULT_BUDGET, f"{size:,} characters against a promise of {mcp_mod.RESULT_BUDGET:,}"
     assert len(out["results"]) == 10
@@ -532,7 +532,7 @@ def test_a_blocked_search_says_how_it_was_refused(monkeypatch):
                       attempts=[{"engine": "google", "status": 429}, {"engine": "bing", "status": 403}])
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(blocked))
     monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
-    out = mcp_mod.web_search("q")
+    out = mcp_mod.search_web("q")
     assert out["status"] == "blocked" and out["results"] == []
     assert out["error"] == "every engine refused the results page"
     assert out["attempts"] == blocked["attempts"]
@@ -542,7 +542,7 @@ def test_a_local_search_that_outlasts_the_clients_wait_hands_back_its_job(monkey
     arc = _Searches(raises=mcp_mod.MeshArcTimeoutError("still running", "s9"))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
     monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
-    out = mcp_mod.web_search("q")
+    out = mcp_mod.search_web("q")
     assert out["status"] == "running" and out["job"] == {"kind": "search", "id": "s9"}
 
 
@@ -554,7 +554,7 @@ def test_hosted_web_search_asks_once_inside_its_budget(monkeypatch):
 
     arc = _Searches(_search(status="queued"))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
-    out = mcp_mod.web_search("q")
+    out = mcp_mod.search_web("q")
     (_query, kw), = arc.calls
     assert kw["wait"] is False and kw["timeout_s"] == 20.0
     assert out["status"] == "running" and out["job"] == {"kind": "search", "id": "s1"}
@@ -562,14 +562,14 @@ def test_hosted_web_search_asks_once_inside_its_budget(monkeypatch):
 
     arc = _Searches(_search(status="running", hits=[_hit(i) for i in range(3)]))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
-    out = mcp_mod.web_search("q", scrape=True)
+    out = mcp_mod.search_web("q", scrape=True)
     assert [r["url"] for r in out["results"]] == [f"https://x.test/{i}" for i in range(3)]
     assert out["job"] == {"kind": "search", "id": "s1"}
     assert "get_job" in out["note"]
 
     arc = _Searches(_search(status="error", error="every engine failed"))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
-    out = mcp_mod.web_search("q")
+    out = mcp_mod.search_web("q")
     assert out == {"error": "every engine failed", "status": 502, "code": "job_failed"}
 
 
@@ -583,7 +583,7 @@ def test_get_job_follows_a_search(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(done))
     polled = mcp_mod.get_job("search", "s1")
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(done))
-    waited = mcp_mod.web_search("q", scrape=True)
+    waited = mcp_mod.search_web("q", scrape=True)
     assert polled == waited, "what an assistant gets by polling is what it would have got by waiting"
     assert "job" not in polled
 
