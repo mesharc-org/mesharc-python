@@ -88,7 +88,7 @@ INSTRUCTIONS = (
 # on a second server later, built with auth in its constructor. The registry is
 # what carries the descriptions across: a description is the only thing an
 # assistant has to pick a tool by, and re-registering without them would leave
-# twenty nameless verbs.
+# twenty-one nameless verbs.
 _TOOLS: "list[tuple]" = []
 
 
@@ -482,7 +482,7 @@ def _scopes():
     return list(getattr(at, "scopes", None) or []) if at else []
 
 
-# Twelve of the twenty tools need write, including every one that fetches a
+# Thirteen of the twenty-one tools need write, including every one that fetches a
 # page: fetching spends the workspace's credits, so it is not a read however
 # it reads to an assistant asking for one URL. The API answers "this needs the
 # member role", which is true and tells an assistant nothing it can act on --
@@ -817,6 +817,24 @@ def stop_crawl(crawl_id: str) -> dict:
     return _safe(go)
 
 
+@tool(description="Remove one page from a project for ever: the page in every run, its screenshots, its "
+                  "entries in the change record, and anything a model extracted from its text. There is no "
+                  "undo. `confirm` must be the page's own url, typed again. `block` also stops the page "
+                  "being fetched again, which changes the project's settings, so its next run starts a "
+                  "fresh baseline and reports every page as new.")
+def delete_page(project_id: str, url: str, confirm: str, block: bool = False) -> dict:
+    """What a removal request asks for, which until now was done by hand.
+
+    `confirm` is the url again, for the reason `delete_project` asks for the
+    id again: this cannot be undone, and an assistant should not reach it by
+    pattern-matching a vague instruction.
+    """
+    if (confirm or "").strip() != url:
+        return {"error": "to remove a page, pass confirm= the page's own url. Nothing was removed.",
+                "code": "confirm_required", "url": url}
+    return _safe(lambda: _client().forget_page(project_id, url, block=block))
+
+
 @tool(description="Delete a project and everything it holds -- its runs, pages and change record -- "
                   "for ever. There is no undo and nothing is kept. `confirm` must be the project's own "
                   "id, typed again, and the person should have asked for this in so many words. To stop "
@@ -895,7 +913,7 @@ def get_job(kind: str, id: str, project_id: str | None = None,
     return _safe(go)
 
 
-# Stdio's server, built now that the twenty are declared. Hosted mode
+# Stdio's server, built now that the twenty-one are declared. Hosted mode
 # builds its own in `authorize`, because auth is set in the constructor.
 server = _build()
 
@@ -1022,7 +1040,7 @@ def _transport_security(public_url):
 
 
 def authorize(issuer, public, secret):
-    """The hosted server: the same twenty tools, with OAuth attached.
+    """The hosted server: the same twenty-one tools, with OAuth attached.
 
     A server of its own rather than the stdio one with auth bolted on after
     the fact. `token_verifier` and `auth` are constructor arguments, and

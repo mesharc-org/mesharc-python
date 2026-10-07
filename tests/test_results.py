@@ -419,6 +419,11 @@ class _Lifecycle:
     def delete(self, project_id):
         self.did.append(("delete", project_id))
 
+    def forget_page(self, project_id, url, block=False):
+        self.did.append(("forget_page", project_id, url, block))
+        return {"url": url, "pages": 2, "screenshots": 1, "changeRecords": 2,
+                "extractions": 1, "blocked": block}
+
     def get_crawl(self, crawl_id):
         self.did.append(("get_crawl", crawl_id))
         outer = self
@@ -470,4 +475,29 @@ def test_the_gentler_thing_is_named_where_it_will_be_read():
     said = [h["description"] for fn, h in mcp_mod._TOOLS if fn is mcp_mod.delete_project][0]
     assert "no undo" in said
     assert "update_project" in said, "it has to name the thing to do instead"
+    assert "confirm" in said
+
+
+def test_removing_a_page_needs_its_url_said_twice(monkeypatch):
+    """Like delete_project, and for the same reason: it cannot be undone, and
+    it is reached from a sentence somebody typed in a hurry."""
+    arc = _Lifecycle()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+
+    for confirm in ("", "yes", "https://x.test/other", "HTTPS://X.TEST/A"):
+        out = mcp_mod.delete_page("p1", "https://x.test/a", confirm)
+        assert out["code"] == "confirm_required", confirm
+    assert arc.did == [], "not one of those may have reached the API"
+
+    out = mcp_mod.delete_page("p1", "https://x.test/a", "https://x.test/a")
+    assert (out["pages"], out["extractions"], out["blocked"]) == (2, 1, False)
+    assert arc.did == [("forget_page", "p1", "https://x.test/a", False)]
+
+
+def test_blocking_a_removed_page_is_asked_for_and_explained():
+    """It changes the project's settings, so the next run is a fresh baseline
+    -- the one consequence a caller cannot see from the name."""
+    said = [h["description"] for fn, h in mcp_mod._TOOLS if fn is mcp_mod.delete_page][0]
+    assert "no undo" in said.lower()
+    assert "fresh baseline" in said
     assert "confirm" in said

@@ -496,6 +496,18 @@ class MeshArc:
         """The change record of a run against the run before it."""
         return self._h("GET", f"/projects/{project_id}/changes", params={"run_id": run_id} if run_id else None)
 
+    def forget_page(self, project_id: str, url: str, block: bool = False) -> Json:
+        """Remove every stored copy of one page from a project: the page in
+        each run, its screenshots, its entries in each run's change record,
+        and anything a model extracted from its text. There is no undo.
+
+        ``block`` also adds the page's path to the project's
+        ``exclude_paths``, so a later run does not fetch it again -- a
+        settings change, so the next run starts a fresh baseline.
+        """
+        return self._h("DELETE", f"/projects/{project_id}/pages",
+                       params={"url": url, "block": "true" if block else "false"})
+
     def page_diff(self, project_id: str, url: str, run_id: Optional[str] = None) -> Json:
         """The word-level diff of one page against the run before."""
         params: Dict[str, Any] = {"url": url}

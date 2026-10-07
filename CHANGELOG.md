@@ -9,7 +9,8 @@ All notable changes to this package are recorded here. The format follows
 ### Added
 
 - **Three tools for ending work**, which the API and this client have always had and the MCP server did not offer: `cancel_run(project_id, run_id)` stops a run and keeps its pages, `stop_crawl(crawl_id)` stops a crawl from `crawl_site` and leaves what it read readable through `get_job`, and `delete_project(project_id, confirm)` deletes a project and everything it holds. All three cost nothing.
-- `delete_project` asks for the project's id in `confirm` before it does anything, and its description names `update_project` with a manual schedule as the thing usually wanted instead. Every other tool here reads or adds, so a misread sentence costs a little money; this one ends a site's whole history, and the model calling it is working from something somebody typed in a hurry.
+- `delete_page(project_id, url, confirm, block=False)` and `MeshArc.forget_page()`, for the removal the privacy policy already promises: the page in every run, its screenshots, its entries in each run's change record, and whatever a model extracted from its text -- which is cached by content and has no expiry of its own. `block=True` also keeps it from being fetched again, at the cost of a settings change and so a fresh baseline on the next run. **Needs the API that has `DELETE /projects/{id}/pages`.**
+- `delete_page` and `delete_project` ask for the url or the project's id in `confirm` before it does anything, and its description names `update_project` with a manual schedule as the thing usually wanted instead. Every other tool here reads or adds, so a misread sentence costs a little money; this one ends a site's whole history, and the model calling it is working from something somebody typed in a hurry.
 
 ## 0.3.1 - 2026-10-03
 
