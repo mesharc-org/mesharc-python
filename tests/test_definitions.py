@@ -14,17 +14,18 @@ mcp_mod = pytest.importorskip("mesharc.mcp", reason="needs the mcp extra")
 
 # The tools that only read what the workspace has stored. Everything else
 # reaches a site or changes the workspace, and a read-only connection is
-# refused it -- the same nine the read_only answer is about.
-READ_ONLY = {"list_projects", "describe_project_config", "get_project", "list_runs", "list_pages",
-             "get_page", "get_changes", "search_pages", "get_job"}
+# refused it -- the same seven the read_only answer is about.
+READ_ONLY = {"list_projects", "get_project", "list_runs", "list_pages", "get_page", "get_changes", "get_job"}
 
 
 def _tools():
     return {t.name: t for t in asyncio.run(mcp_mod.server.list_tools())}
 
 
-def test_all_nineteen_are_listed():
-    assert len(_tools()) == 19
+def test_all_fifteen_are_listed():
+    # 0.4.0 folded five tools into the siblings they overlapped and added
+    # delete_project: nineteen became fifteen.
+    assert len(_tools()) == 15
 
 
 def test_every_parameter_is_described():
@@ -50,9 +51,10 @@ def test_the_hints_say_which_tools_only_read():
 
 def test_only_the_tools_that_overwrite_or_stop_are_destructive():
     # update_project replaces values; cancel_job stops work that cannot be
-    # resumed where it was. Nothing else changes what is already there.
+    # resumed where it was; delete_project removes a project and its history.
+    # Nothing else changes what is already there.
     destructive = {n for n, t in _tools().items() if t.annotations.destructive_hint}
-    assert destructive == {"update_project", "cancel_job"}
+    assert destructive == {"update_project", "cancel_job", "delete_project"}
 
 
 def test_fixed_choices_are_listed():
@@ -65,8 +67,8 @@ def test_fixed_choices_are_listed():
 
     assert enum("get_job", "kind") == ["crawl", "run", "batch"]
     assert enum("cancel_job", "kind") == ["crawl", "run", "batch"]
-    assert enum("search_pages", "mode") == ["content", "selector"]
-    for tool in ("create_project", "keep_crawl_as_project", "update_project"):
+    assert enum("list_pages", "mode") == ["content", "selector"]
+    for tool in ("create_project", "update_project"):
         assert enum(tool, "schedule") == ["manual", "hourly", "daily", "weekly"]
 
 
@@ -75,8 +77,8 @@ def test_each_description_states_the_access_its_hints_declare():
     # contradiction down to 1, and an assistant told a tool only reads would
     # call it on a read-only connection and be refused.
     for name, t in _tools().items():
-        says_read_only = "Works on a read-only connection" in t.description
-        says_write = "Needs write access" in t.description
+        says_read_only = "Read-only and free" in t.description
+        says_write = "Needs write access" in t.description or "Needs an admin API key" in t.description
         assert says_read_only == (name in READ_ONLY), name
         assert says_write == (name not in READ_ONLY), name
 
@@ -93,7 +95,7 @@ def test_list_projects_passes_on_each_projects_status(monkeypatch):
         projects = _Projects()
 
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Client())
-    rows = mcp_mod.list_projects()
+    rows = mcp_mod.list_projects()["projects"]
     assert rows[0]["status"] == "failing" and "health" not in rows[0]
     assert "webhookSecret" not in rows[0]
 

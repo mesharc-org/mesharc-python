@@ -237,14 +237,14 @@ def test_an_unreachable_issuer_stops_the_server(monkeypatch):
 
 
 def test_get_job_is_offered_alongside_the_rest():
-    """Nineteen declared, and nineteen on the server that was built from
+    """Fifteen declared, and fifteen on the server that was built from
     them. Counting `@server.tool` in the source said nothing about what the
     server ended up carrying."""
     import anyio
 
-    assert len(mcp_mod._TOOLS) == 19, "sixteen verbs plus get_job, cancel_job and list_runs"
+    assert len(mcp_mod._TOOLS) == 15, "thirteen verbs plus get_job and cancel_job"
     served = [t.name for t in anyio.run(mcp_mod.server.list_tools)]
-    assert len(served) == 19
+    assert len(served) == 15
     assert "get_job" in served
     assert callable(mcp_mod.get_job)
 
@@ -426,7 +426,7 @@ def test_the_server_answers_a_real_call_as_the_caller_who_sent_it(served):
     r, listed = _rpc(served, "tools/list", session=sid)
     assert r.status_code == 200, r.text
     names = [t["name"] for t in listed["result"]["tools"]]
-    assert len(names) == 19, names
+    assert len(names) == 15, names
     assert "get_job" in names
 
     r, out = _rpc(served, "tools/call", {"name": "list_projects", "arguments": {}}, session=sid)
@@ -450,8 +450,8 @@ def test_auth_is_attached_through_the_constructor(served):
     assert str(mcp_mod.server.settings.auth.resource_server_url).rstrip("/") == RESOURCE.rstrip("/")
     assert mcp_mod.server.settings.auth.validate_token_resource is True
 
-    # Both servers carry the same nineteen tools, declared once.
-    assert len(mcp_mod._TOOLS) == 19
+    # Both servers carry the same fifteen tools, declared once.
+    assert len(mcp_mod._TOOLS) == 15
     names = {fn.__name__ for fn, _how in mcp_mod._TOOLS}
     assert "get_job" in names
     assert all(how.get("description") for _fn, how in mcp_mod._TOOLS),         "a tool with no description is a verb an assistant cannot choose"

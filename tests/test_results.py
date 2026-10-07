@@ -160,7 +160,7 @@ def test_a_batch_is_shaped_like_a_crawl():
     assert len(json.dumps(out)) <= 65_000
     assert all(isinstance(p["links"], int) for p in out["pages"])
     assert len(out["index"]) == 50
-    assert "extract_url" in out["pages"][0]["markdown"]
+    assert "scrape_urls" in out["pages"][0]["markdown"]
 
 
 def test_one_page_asked_for_alone_is_not_rationed():
