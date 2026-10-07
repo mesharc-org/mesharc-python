@@ -591,14 +591,20 @@ def _safe(fn):
 
 @tool(title="Scrape a list of URLs",
       annotations=_acts(idempotent=True),
-      description="Fetch known URLs (1 to 500) once and return each page's content, markdown by default; no project "
-                  "is created. For one page with every format or browser steps use extract_url; to find pages by "
-                  "following links use crawl_site; to list a site's URLs without fetching them use map_site. "
-                  "Each page costs the credits of the engine that read it (1 plain fetch, 4 browser render), and a "
-                  "page the site refuses is free. A single URL answers in the same request; a list waits for the "
-                  "batch, and a large one comes back as an index with excerpts inside 60,000 characters. Hosted, a "
-                  "batch still going after the time budget comes back as a job for get_job, and repeating the same "
-                  "call returns that job instead of starting another.")
+      description="Fetch known URLs (1 to 500) once and return each page's content. No project is created.\n"
+                  "Use extract_url for one page with browser steps or structured fields, crawl_site to discover "
+                  "pages by following links, and map_site to list a site's URLs without fetching them.\n"
+                  "Inputs: `formats` only picks which stored bodies come back (e.g. 'markdown,text'); how a page is "
+                  "fetched and extracted is `config`. A PDF, Word or spreadsheet URL is read as text unless "
+                  "parse_documents is false.\n"
+                  "Cost: the credits of the engine that read each page (1 plain fetch, 4 browser render). A page "
+                  "the site refuses is free.\n"
+                  "Returns: one URL answers in the same request. A list waits for the batch, and a large batch is "
+                  "an index plus excerpts inside 60,000 characters. Hosted, a batch still going after the time "
+                  "budget comes back as a job for get_job. Repeating the same call returns that job instead of "
+                  "starting another.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def scrape_urls(urls: Annotated[list[str], Field(
                     description="The pages to fetch: 1 to 500 absolute http(s) URLs.")],
                 config: FetchConfig = None,
@@ -633,16 +639,21 @@ def scrape_urls(urls: Annotated[list[str], Field(
 
 @tool(title="Extract one page in full",
       annotations=_acts(),
-      description="Fetch one URL exactly as a project with the given settings would, and return the whole page: "
-                  "the bodies config's formats ask for plus the raw html (each capped at 12,000 characters), head "
-                  "and extracted fields, its images, and which engine read it -- without its link list. Use it "
-                  "for a single page that needs browser steps, structured fields or a settings trial before "
-                  "create_project; for plain content of one or many known URLs use scrape_urls, and get_page "
-                  "reads a page a project already stored without fetching. It climbs the fetch ladder -- plain "
-                  "http first, a browser only when the page needs one or render_js is 'always' -- and costs the "
-                  "credits of the rung that read it (1 to 4 for most pages, +1 when formats ask for a "
-                  "screenshot). Browser `actions` in config (click, type, select, press, wait, scroll; repeat "
-                  "'until_gone' for Load-more buttons; `each` to act on every match) run before the page is read.")
+      description="Fetch one URL exactly as a project with the given settings would, and return the whole page: the "
+                  "bodies config's formats ask for plus the raw html (each capped at 12,000 characters), head and "
+                  "extracted fields, its images, and which engine read it. The link list is left out.\n"
+                  "Use it for one page that needs browser steps, structured fields, or a settings trial before "
+                  "create_project. For plain content of known URLs use scrape_urls. To read a page a project "
+                  "already stored, without fetching, use get_page.\n"
+                  "Inputs: browser `actions` in config (click, type, select, press, wait, scroll; repeat "
+                  "'until_gone' for Load-more buttons; `each` to act on every match) run before the page is read. A "
+                  "parse_documents key in config wins over the parse_documents argument.\n"
+                  "Behaviour: it climbs the fetch ladder, plain http first and a browser only when the page needs "
+                  "one or render_js is 'always'. It costs the credits of the rung that read it (1 to 4 for most "
+                  "pages, +1 when formats ask for a screenshot). A page the site refuses comes back marked blocked, "
+                  "at no cost, rather than as an error.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def extract_url(url: Annotated[str, Field(description="The absolute http(s) URL of the page to read.")],
                 config: FetchConfig = None,
                 parse_documents: ParseDocuments = True) -> dict:
@@ -658,12 +669,18 @@ def extract_url(url: Annotated[str, Field(description="The absolute http(s) URL 
 
 @tool(title="Map a site's declared URLs",
       annotations=_acts(),
-      description="List every URL a site declares in its sitemaps -- found through robots.txt and the well-known "
-                  "paths, each index file walked to its children -- without fetching any of the pages. Use it "
-                  "first, to see how big a site is and what sections it has, before crawl_site or create_project; "
-                  "it cannot read page content (scrape_urls or crawl_site do) and misses pages a site links to but "
-                  "does not declare. Costs 1 credit per sitemap file read, usually 1 in total, never per URL. "
-                  "Returns the discovery method, totals, up to `limit` URLs and the section names.")
+      description="List every URL a site declares in its sitemaps (found through robots.txt and the well-known "
+                  "paths, each index file walked to its children) without fetching any of the pages.\n"
+                  "Use it first, to see how big a site is and what sections it has, before crawl_site or "
+                  "create_project. It cannot read page content (scrape_urls or crawl_site do), and it misses pages "
+                  "a site links to but does not declare.\n"
+                  "Inputs: `url` can be any page of the site, since discovery starts at the site's root. `search` "
+                  "is a case-insensitive substring of the full URL, with no wildcards, applied before `limit`. "
+                  "`totals` still count every declared URL.\n"
+                  "Cost: 1 credit per sitemap file read (usually 1 in total), never per URL.\n"
+                  "Returns: the discovery method, totals, up to `limit` URLs and the section names.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def map_site(url: Annotated[str, Field(description="Any URL on the site, usually its home page.")],
              search: Annotated[str | None, Field(
                  description="Keep only URLs containing this text, e.g. '/blog/'; omit for all.")] = None,
@@ -681,16 +698,22 @@ def map_site(url: Annotated[str, Field(description="Any URL on the site, usually
 
 @tool(title="Crawl a whole site once",
       annotations=_acts(idempotent=True),
-      description="Crawl a site once from a start URL -- following its links and reading its sitemap, up to "
-                  "`limit` pages -- and return what it found, without setting up a project. Use it to read a site "
-                  "or section whose page URLs you do not know; for known URLs use scrape_urls, and to watch a site "
-                  "over time use create_project (or keep_crawl_as_project on this crawl afterwards). Each page "
-                  "costs the credits of the engine that read it (usually 1 to 4) and refused pages are free. It "
-                  "waits for the crawl, minutes for a large limit; hosted, a crawl still going after the time "
-                  "budget comes back as a job for get_job, and repeating the call returns the same crawl. The "
-                  "answer is an index of the pages read plus excerpts inside 60,000 characters; get_job with "
-                  "`url` reads one page in full and with `cursor` the next window. The crawl is kept for a day; "
-                  "pass the result's crawl_id to keep_crawl_as_project to keep it for good.")
+      description="Crawl a site once from a start URL, following its links and reading its sitemap up to `limit` "
+                  "pages, and return what it found. No project is set up.\n"
+                  "Use it to read a site or section whose page URLs you do not know. For known URLs use "
+                  "scrape_urls. To watch a site over time use create_project, or keep_crawl_as_project on this "
+                  "crawl afterwards.\n"
+                  "Inputs: include_paths and exclude_paths match the URL path only, never the host, and pages they "
+                  "leave out do not count toward `limit`. '/blog/*' takes the blog index and everything under it. "
+                  "`max_depth` counts link hops from the start URL (0 = that page only).\n"
+                  "Cost: the credits of the engine that read each page (usually 1 to 4). Refused pages are free.\n"
+                  "Behaviour: it waits for the crawl, minutes for a large limit. Hosted, a crawl still going after "
+                  "the time budget comes back as a job for get_job, and repeating the call returns the same crawl.\n"
+                  "Returns: an index of the pages read plus excerpts inside 60,000 characters. get_job with `url` "
+                  "reads one page in full, and with `cursor` the next window. The crawl is kept for a day; pass its "
+                  "crawl_id to keep_crawl_as_project to keep it for good.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def crawl_site(url: Annotated[str, Field(description="The absolute http(s) URL to start from, e.g. the home page.")],
                limit: Annotated[int, Field(
                    description="The most pages to read, 1 to 5,000 (default 50); the plan's page cap also applies.")]
@@ -740,12 +763,19 @@ def crawl_site(url: Annotated[str, Field(description="The absolute http(s) URL t
 
 @tool(title="Keep a crawl as a project",
       annotations=_acts(open_world=False),
-      description="Turn a crawl_site crawl into a project, so the site is watched over time and each later run "
-                  "is compared against this one. Nothing is fetched again and it costs no credits: the crawl's "
-                  "pages become the project's first run. Use it after crawl_site when the site is worth watching; "
-                  "to start a watched site from scratch use create_project. Without it a crawl and its pages "
-                  "expire after a day. It counts toward the plan's project limit (refused with plan_limit when "
-                  "full). Returns the new project, whose id the other project tools take.")
+      description="Turn a crawl_site crawl into a project, so the site is watched over time and each later run is "
+                  "compared with this one.\n"
+                  "Use it after crawl_site when the site is worth watching. To start a watched site from scratch "
+                  "use create_project.\n"
+                  "Inputs: `crawl_id` must be a crawl this workspace started, kept within a day. After that the "
+                  "crawl and its pages have expired and the call answers 404. A `schedule` other than 'manual' "
+                  "starts runs on its own, and each run spends credits.\n"
+                  "Behaviour: nothing is fetched again and it costs no credits; the crawl's pages become the "
+                  "project's first run. It counts toward the plan's project limit and is refused with plan_limit "
+                  "when that is full.\n"
+                  "Returns: the new project, whose id the other project tools take.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def keep_crawl_as_project(crawl_id: Annotated[str, Field(
                               description="The crawl_id a crawl_site answer (or get_job on a crawl) returned.")],
                           name: Annotated[str | None, Field(
@@ -762,13 +792,17 @@ def keep_crawl_as_project(crawl_id: Annotated[str, Field(
 
 @tool(title="List all projects",
       annotations=READS_STORED,
-      description="List every project in the workspace -- the sites it watches over time -- with each one's id, "
-                  "name, seed URL, host, schedule, page count, coverage, last run and health. Call it first to "
-                  "find a project_id for the other project tools, or to check whether a site is already watched "
-                  "before create_project; get_project gives one project's full settings. Reads only what is "
-                  "stored: free, and it fetches nothing. A key limited to some projects sees only those.")
+      description="List every project in the workspace (the sites it watches over time) with each one's id, name, "
+                  "seed URL, host, schedule, page count, coverage, last run and status (draft, crawling, healthy or "
+                  "failing).\n"
+                  "Call it first to find a project_id for the other project tools, or to check whether a site is "
+                  "already watched before create_project. get_project gives one project's full settings.\n"
+                  "Returns: all projects in one answer, oldest first, with no paging. A key limited to some "
+                  "projects sees only those.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def list_projects() -> list | dict:
-    return _safe(lambda: [{k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "pages", "coverage", "lastRun", "health")}
+    return _safe(lambda: [{k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "pages", "coverage", "lastRun", "status")}
                           for p in _client().projects.list()])
 
 
@@ -821,11 +855,16 @@ CONFIG_GUIDE = {
 
 @tool(title="Describe project settings",
       annotations=READS_STORED,
-      description="List the project settings an assistant can set -- each key with its meaning and its default "
-                  "-- plus the valid schedules and how path globs work. Read it before create_project, "
-                  "update_project or a `config` argument whenever the request names a section, schedule, format, "
-                  "limit or behaviour: keys are exact and guessed names are refused. It describes settings in "
-                  "general; get_project shows the values one project has. Free, and it fetches nothing.")
+      description="List the project settings an assistant can set, each with its meaning and default, plus the "
+                  "valid schedules and how path globs work.\n"
+                  "Read it before create_project, update_project or any `config` argument whenever the request "
+                  "names a section, schedule, format, limit or behaviour. Keys are exact, and guessed names are "
+                  "refused.\n"
+                  "It describes settings in general. get_project shows the values one project has.\n"
+                  "Returns: `settings` as [{key, meaning, default}], `other_keys` (accepted but rarely needed), "
+                  "`schedules`, and a `note` on path globs.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def describe_project_config() -> dict:
     def go():
         with _client() as s:
@@ -841,24 +880,34 @@ def describe_project_config() -> dict:
 
 @tool(title="Get one project",
       annotations=READS_STORED,
-      description="Read one project in full: its settings (config), schedule, retention, coverage and last run. "
-                  "Read it before update_project, to see the values you are about to change; list_projects is "
-                  "the lighter way to find projects, and list_pages or get_changes read what its runs found. "
-                  "Free, fetches nothing; an unknown or hidden project answers 404. The webhook signing secret "
-                  "is withheld from the answer.")
+      description="Read one project in full: its settings (config), schedule, retention, coverage and last run.\n"
+                  "Read it before update_project, to see the values you are about to change. list_projects is the "
+                  "lighter way to find projects. list_pages and get_changes read what its runs found.\n"
+                  "Inputs: `project_id` is the 32-character hex id that list_projects shows, not the project's name "
+                  "or URL. An unknown id, or a project the key cannot see, answers 404.\n"
+                  "Returns: the project's id, name, seed, host, schedule, config, retention, pages, coverage, "
+                  "status, lastRun, nextRunAt and changeSummary. The webhook signing secret is withheld.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def get_project(project_id: ProjectId) -> dict:
     return _safe(lambda: _client().projects.get(project_id))
 
 
 @tool(title="Create a watched project",
       annotations=_acts(),
-      description="Create a project that watches a site over time: it is crawled on its schedule and each run is "
-                  "compared with the last, recording pages added, modified and removed. Use it when the request "
-                  "is to monitor or track a site; for a one-off read use crawl_site (keep_crawl_as_project can "
-                  "turn that into a project later), and check list_projects first so the site is not added "
-                  "twice. Creating it reads the site's robots.txt and sitemaps but fetches no pages; every run "
-                  "then spends credits per page. Refused when the plan's project limit is reached. Returns the "
-                  "project, whose id start_run takes to crawl it now.")
+      description="Create a project that watches a site over time. It is crawled on its schedule and each run is "
+                  "compared with the last, recording pages added, modified and removed.\n"
+                  "Use it when the request is to monitor or track a site. For a one-off read use crawl_site (and "
+                  "keep_crawl_as_project later if it is worth keeping). Check list_projects first so the site is "
+                  "not added twice.\n"
+                  "Inputs: `seed` fixes the project's host for good; no later update can move it to another site. A "
+                  "`schedule` other than 'manual' starts runs on its own. Unknown `config` keys are refused, and "
+                  "values above the plan's caps (such as max_pages) are lowered to them.\n"
+                  "Behaviour: creating it reads the site's robots.txt and sitemaps but fetches no pages. Every run "
+                  "then spends credits per page. It is refused when the plan's project limit is reached.\n"
+                  "Returns: the new project, in get_project's shape; start_run takes its id to crawl it now.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def create_project(seed: Annotated[str, Field(
                        description="Where the crawl starts: a public site's URL or bare domain, e.g. "
                                    "'https://example.com/blog/' or 'example.com'. The project covers that host.")],
@@ -877,12 +926,16 @@ def create_project(seed: Annotated[str, Field(
 
 @tool(title="Update a project's settings",
       annotations=_acts(destructive=True, idempotent=True, open_world=False),
-      description="Change an existing project's name, schedule or settings. Only what you pass changes: in "
-                  "`config` only the keys given are replaced, the rest stay; a replaced value is not kept. Call "
-                  "get_project first to see the current values, and describe_project_config for valid keys; to "
-                  "start a different site use create_project instead. Nothing is fetched and no credits are "
-                  "spent now; the next run uses the new settings, and a settings change that alters how pages "
-                  "are read starts a fresh comparison baseline. Returns the updated project.")
+      description="Change an existing project's name, schedule or settings.\n"
+                  "Call get_project first to see the current values, and describe_project_config for valid keys. To "
+                  "watch a different site use create_project instead.\n"
+                  "Inputs: only what you pass changes. In `config` only the keys given are replaced and the rest "
+                  "stay. A replaced value is gone, not versioned.\n"
+                  "Behaviour: nothing is fetched and no credits are spent now. The next run uses the new settings. "
+                  "A change that alters how pages are read starts a fresh comparison baseline.\n"
+                  "Returns: the updated project, in get_project's shape.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def update_project(project_id: ProjectId,
                    name: Annotated[str | None, Field(description="A new name; omit to leave it.")] = None,
                    schedule: Annotated[Schedule | None, Field(
@@ -907,16 +960,19 @@ def update_project(project_id: ProjectId,
 
 @tool(title="Start a project run now",
       annotations=_acts(),
-      description="Crawl a project's site now with its saved settings, outside its schedule; the run is then "
-                  "compared with the last one. Use it after create_project or update_project, or when fresh "
-                  "results are wanted; to re-read only a few pages use recrawl_pages, and for a site with no "
-                  "project use crawl_site. Every page read costs credits (usually 1 to 4) and a run stops when "
-                  "the credit budget runs out, keeping what it read; it is refused with 409 while a run of the "
-                  "project is already queued or running, and 402 when no credits are left. Without wait it "
-                  "returns the queued run at once; with wait it returns the finished run, except hosted, where "
-                  "a run still going after "
-                  "the time budget comes back as a job for get_job. Results are read with list_pages and "
-                  "get_changes.")
+      description="Crawl a project's site now with its saved settings, outside its schedule. The run is then "
+                  "compared with the last one.\n"
+                  "Use it after create_project or update_project, or when fresh results are wanted. To re-read only "
+                  "a few pages use recrawl_pages. For a site with no project use crawl_site.\n"
+                  "Cost: every page read costs credits (usually 1 to 4). A run stops when the credit budget runs "
+                  "out and keeps what it read.\n"
+                  "Refusals: 409 while a run of the project is already queued or running, and 402 when no credits "
+                  "are left.\n"
+                  "Returns: without wait, the queued run at once. With wait, the finished run, except hosted, where "
+                  "a run still going after the time budget comes back as a job for get_job. Read the results with "
+                  "list_pages and get_changes.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def start_run(project_id: ProjectId,
               wait: Annotated[bool, Field(
                   description="true waits for the run to finish (minutes for a large site); false (default) "
@@ -936,12 +992,16 @@ def start_run(project_id: ProjectId,
 
 @tool(title="List a run's pages",
       annotations=READS_STORED,
-      description="List the pages one project run stored -- the last finished run unless run_id is given -- "
-                  "with each page's url, status, depth, word count and when it last changed, up to 500 rows, "
-                  "plus the runId. Use it to see what a crawl covered or to pick a URL; get_page reads one of "
-                  "them in full, search_pages finds pages by their text, and get_changes lists only what "
-                  "changed. Free and reads only what is stored: it never fetches the site. A project with no "
-                  "finished run answers with no pages.")
+      description="List the pages one project run stored, with each page's url, status, depth, word count and when "
+                  "it last changed, plus the run's link-graph summary and its runId.\n"
+                  "Use it to see what a crawl covered or to pick a URL. get_page reads one page in full, "
+                  "search_pages finds pages by their text, and get_changes lists only what changed.\n"
+                  "Inputs: `run_id` is a run's id, not a number or a date. Leave it empty for the latest finished "
+                  "run; a project with no finished run answers with no pages.\n"
+                  "Returns: up to 500 rows, shallowest pages first. A larger run is cut at 500, so use search_pages "
+                  "to find pages beyond that.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def list_pages(project_id: ProjectId, run_id: RunId = None) -> dict:
     def go():
         r = _client().pages(project_id, run_id)
@@ -953,11 +1013,16 @@ def list_pages(project_id: ProjectId, run_id: RunId = None) -> dict:
 @tool(title="Get one stored page",
       annotations=READS_STORED,
       description="Read one page a project run stored, in full: its markdown and other bodies (each capped at "
-                  "12,000 characters), head fields (title, description, canonical, h1), extracted fields, and "
-                  "its versions across runs. Use it when you know the page's URL; list_pages or search_pages "
-                  "finds the URL first, and for a page from a crawl_site crawl use get_job with url instead. "
-                  "Free and reads only what is stored, so it never fetches the site -- use extract_url for a "
-                  "live copy. A URL the run did not store answers 404.")
+                  "12,000 characters), head fields (title, description, canonical, h1), extracted fields, and its "
+                  "versions across runs.\n"
+                  "Use it when you know the page's URL; list_pages or search_pages finds it first. For a page from "
+                  "a crawl_site crawl use get_job with url instead. For a live copy use extract_url.\n"
+                  "Inputs: `url` is an address, not a search term. The scheme and a trailing slash may differ, but "
+                  "the rest of the URL, query string included, must match exactly. `run_id` pins that run's copy; "
+                  "without it, the newest copy across the project's last 50 runs.\n"
+                  "A URL the run did not store answers 404.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def get_page(project_id: ProjectId,
              url: Annotated[str, Field(
                  description="The page's full URL as list_pages or search_pages shows it; the other scheme or "
@@ -970,14 +1035,18 @@ def get_page(project_id: ProjectId,
 
 @tool(title="Get what changed in a run",
       annotations=READS_STORED,
-      description="Report what changed in a project run against the run before it -- the last finished run "
-                  "unless run_id is given: pages added, modified and removed, head-field changes (title, "
-                  "description, canonical...), and the run's coverage, with up to 200 entries per list plus the "
-                  "runs a record exists for. Use it to answer 'what changed on the site'; list_pages shows every "
-                  "page whatever changed, and get_page shows one page's text and versions. Removals are withheld "
-                  "when the crawl reached under 90% of the site, so a blocked crawl never reports the site as "
-                  "gone. A project's first run is a baseline with nothing to compare. Free and reads only what "
-                  "is stored.")
+      description="Report what changed in a project run against the run before it: pages added, modified and "
+                  "removed, head-field changes (title, description, canonical), and the run's coverage.\n"
+                  "Use it to answer 'what changed on the site'. list_pages shows every page whatever changed, and "
+                  "get_page shows one page's text and versions.\n"
+                  "Inputs: `run_id` picks the run whose record to read, and that run is always compared with the "
+                  "run just before it. Leave it empty for the latest finished run. A run still going answers 409.\n"
+                  "Behaviour: removals are withheld when the crawl reached under 90% of the site, so a blocked "
+                  "crawl never reports the site as gone. A project's first run is a baseline with nothing to "
+                  "compare.\n"
+                  "Returns: up to 200 entries per list, plus the runs a record exists for.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def get_changes(project_id: ProjectId, run_id: RunId = None) -> dict:
     def go():
         r = _client().changes(project_id, run_id)
@@ -991,12 +1060,18 @@ def get_changes(project_id: ProjectId, run_id: RunId = None) -> dict:
 
 @tool(title="Search a run's stored pages",
       annotations=READS_STORED,
-      description="Find which pages of a project run contain some text or an element -- the last finished run "
-                  "unless run_id is given -- returning the matching URLs with how many pages were scanned. Use "
-                  "it to locate pages by what they say or contain; list_pages lists every page and get_page "
-                  "then reads one in full. It scans the stored copies and never fetches the site, so it is free "
-                  "and as fresh as the run. A selector search needs the run to have kept html (the rawHtml "
-                  "format); when none was kept the answer says so rather than reporting no matches.")
+      description="Find which pages of a project run contain some text or an element, and return the matching URLs "
+                  "with how many pages were scanned.\n"
+                  "Use it to locate pages by what they say or contain. list_pages lists every page, and get_page "
+                  "then reads one in full. It cannot search a crawl_site crawl or the live site: use get_job or "
+                  "extract_url for those.\n"
+                  "Inputs: a selector search needs the run to have kept html (the rawHtml format). When none was "
+                  "kept, the answer says so rather than reporting no matches. Leave run_id empty for the latest "
+                  "finished run.\n"
+                  "Returns: up to 500 hits, each {url, count, snippet}, with `scanned`, `noBody` and `truncated` "
+                  "(true when more pages matched). It is as fresh as the run.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def search_pages(project_id: ProjectId,
                  q: Annotated[str, Field(
                      description="What to look for, 1 to 200 characters. In content mode every word must "
@@ -1011,29 +1086,42 @@ def search_pages(project_id: ProjectId,
 
 @tool(title="Re-crawl chosen pages",
       annotations=_acts(),
-      description="Fetch specific pages of a project again now, as a small run of their own whose record "
-                  "compares just those pages with the last full run. Use it to check a few pages you expect "
-                  "changed without crawling the whole site; start_run re-crawls everything, and extract_url "
-                  "reads a page outside any project. Each page costs credits (usually 1 to 4). The URLs must be "
-                  "on the project's site; refused with 409 while another run of the project is queued or "
-                  "running. Returns the queued run; follow it with get_job (kind 'run') and read results with "
-                  "get_changes.")
+      description="Fetch specific pages of a project again now, as a small run of their own whose record compares "
+                  "just those pages with the last full run.\n"
+                  "Use it to check a few pages you expect changed without crawling the whole site. start_run "
+                  "re-crawls everything, and extract_url reads a page outside any project.\n"
+                  "Inputs: a path such as '/pricing' is resolved against the project's site. A URL on another site "
+                  "is refused with 400 naming it, before anything runs.\n"
+                  "Cost: each page costs credits (usually 1 to 4). A page that fails is recorded in the run with "
+                  "its status, not dropped.\n"
+                  "Refusals: 409 while another run of the project is queued or running.\n"
+                  "Returns: the queued run. Follow it with get_job (kind 'run') and read the results with "
+                  "get_changes.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
 def recrawl_pages(project_id: ProjectId,
                   urls: Annotated[list[str], Field(
-                      description="1 to 500 full URLs on the project's site to fetch again.")]) -> dict:
+                      description="1 to 500 pages on the project's site to fetch again: full URLs, or paths "
+                                  "such as '/pricing'.")]) -> dict:
     return _safe(lambda: _client().recrawl(project_id, urls))
 
 
 @tool(title="Follow a long-running job",
       annotations=READS_STORED,
-      description="Check on a job a long tool handed back -- a crawl from crawl_site, a run from start_run or "
-                  "recrawl_pages, or a batch from scrape_urls -- and, once it has finished, return the same "
-                  "result the original tool would have given; while it is still going, its status and counts. "
-                  "Call it when a tool answered with status 'running' and a job; calling the original tool "
-                  "again is not needed and would not start a second job. For a crawl it is also how to read "
-                  "further: `url` returns one page in full (even mid-crawl) and `cursor` the next window of "
-                  "pages. For a project's stored pages use get_page instead. Free: it only reads stored "
-                  "results and never fetches.")
+      description="Check on a job a long tool handed back (a crawl from crawl_site, a run from start_run or "
+                  "recrawl_pages, or a batch from scrape_urls) and return its result once it has finished.\n"
+                  "Call it when a tool answered with status 'running' and a job. Calling the original tool again is "
+                  "not needed and would not start a second job. For a project's stored pages use get_page instead.\n"
+                  "Inputs: for a crawl, `url` returns one page in full (even mid-crawl) and `cursor` the next "
+                  "window of pages.\n"
+                  "Returns: while it runs, {status: 'running', job, counts}. Once finished, a crawl gives "
+                  "crawl_site's answer (crawl_id, status, pages, index, counts, stop, note, and cursor when there "
+                  "is more), a batch gives scrape_urls' answer, and a run gives the run record (id, status, "
+                  "counts).\n"
+                  "Behaviour: a crawl expires a day after it started unless it was kept, and then the call answers "
+                  "404.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
 def get_job(kind: Annotated[Literal["crawl", "run", "batch"], Field(
                 description="What the job is: 'crawl' (crawl_site), 'run' (start_run, recrawl_pages) or "
                             "'batch' (scrape_urls); the 'job' object a tool returned names it.")],

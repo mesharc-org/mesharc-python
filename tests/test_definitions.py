@@ -65,3 +65,31 @@ def test_fixed_choices_are_listed():
     assert enum("search_pages", "mode") == ["content", "selector"]
     for tool in ("create_project", "keep_crawl_as_project", "update_project"):
         assert enum(tool, "schedule") == ["manual", "hourly", "daily", "weekly"]
+
+
+def test_each_description_states_the_access_its_hints_declare():
+    # The description and the hints must never disagree: graders mark a
+    # contradiction down to 1, and an assistant told a tool only reads would
+    # call it on a read-only connection and be refused.
+    for name, t in _tools().items():
+        says_read_only = "Works on a read-only connection" in t.description
+        says_write = "Needs write access" in t.description
+        assert says_read_only == (name in READ_ONLY), name
+        assert says_write == (name not in READ_ONLY), name
+
+
+def test_list_projects_passes_on_each_projects_status(monkeypatch):
+    # It asked the API for `health`, which no project has ever carried, so
+    # every row said health: null. The project's state is `status`.
+    class _Projects:
+        @staticmethod
+        def list():
+            return [{"id": "p1", "name": "Docs", "status": "failing", "webhookSecret": "whsec_x"}]
+
+    class _Client:
+        projects = _Projects()
+
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Client())
+    rows = mcp_mod.list_projects()
+    assert rows[0]["status"] == "failing" and "health" not in rows[0]
+    assert "webhookSecret" not in rows[0]

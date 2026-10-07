@@ -6,6 +6,20 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.3.3 - 2026-10-07
+
+### Changed
+
+- **Tool descriptions are written in short lines, one fact each.** Glama's grader scored 0.3.2's tools A (4.6/5). The points it took off were for clauses chained by semicolons, and for descriptions that added nothing about the inputs beyond the schema. Each description now keeps its purpose and when-to-use lines, and adds:
+  - **Inputs:** how the inputs work together. Examples: `formats` only picks which stored bodies come back; path globs match the path, never the host; a `get_page` url must match apart from scheme and trailing slash; `recrawl_pages` resolves '/pricing' against the project's site.
+  - **Access:** whether a read-only connection may call it, and that errors come back as `{error, status}`.
+  - **Returns and limits:** the answer's shape and its limits. Examples: `list_pages` returns up to 500 rows, shallowest first; `list_projects` returns everything, oldest first; `get_changes` answers 409 for a run still going; `get_job` answers 404 once a crawl has expired.
+- Apart from the fix below, behaviour is unchanged. Only the text an assistant reads differs.
+
+### Fixed
+
+- `list_projects` returns each project's `status` (draft, crawling, healthy or failing). It asked the API for `health`, which no project carries, so every row said `health: null`.
+
 ## 0.3.2 - 2026-10-06
 
 ### Changed
