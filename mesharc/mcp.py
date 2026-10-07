@@ -88,7 +88,7 @@ INSTRUCTIONS = (
 # on a second server later, built with auth in its constructor. The registry is
 # what carries the descriptions across: a description is the only thing an
 # assistant has to pick a tool by, and re-registering without them would leave
-# seventeen nameless verbs.
+# twenty nameless verbs.
 _TOOLS: "list[tuple]" = []
 
 
@@ -482,7 +482,7 @@ def _scopes():
     return list(getattr(at, "scopes", None) or []) if at else []
 
 
-# Nine of the seventeen tools need write, including every one that fetches a
+# Twelve of the twenty tools need write, including every one that fetches a
 # page: fetching spends the workspace's credits, so it is not a read however
 # it reads to an assistant asking for one URL. The API answers "this needs the
 # member role", which is true and tells an assistant nothing it can act on --
@@ -802,6 +802,49 @@ def recrawl_pages(project_id: str, urls: list[str]) -> dict:
     return _safe(lambda: _client().recrawl(project_id, urls))
 
 
+@tool(description="Stop a run that is queued or still going. Its pages so far are kept, and the run is "
+                  "recorded as cancelled. Nothing is refunded for pages already read. Costs nothing.")
+def cancel_run(project_id: str, run_id: str) -> dict:
+    return _safe(lambda: _client().runs.cancel(project_id, run_id))
+
+
+@tool(description="Stop a crawl from crawl_site. Its pages so far stay readable through get_job. "
+                  "Costs nothing.")
+def stop_crawl(crawl_id: str) -> dict:
+    def go():
+        with _client() as s:
+            return s.get_crawl(crawl_id).cancel()
+    return _safe(go)
+
+
+@tool(description="Delete a project and everything it holds -- its runs, pages and change record -- "
+                  "for ever. There is no undo and nothing is kept. `confirm` must be the project's own "
+                  "id, typed again, and the person should have asked for this in so many words. To stop "
+                  "a project being crawled without losing its history, set its schedule to 'manual' with "
+                  "update_project instead.")
+def delete_project(project_id: str, confirm: str) -> dict:
+    """The one tool here that cannot be undone.
+
+    `confirm` is not ceremony. Every other tool in this file either reads or
+    adds, so a misread sentence costs a little money at worst; this one ends a
+    site's whole history, and the model calling it is working from a sentence
+    somebody typed in a hurry. Making the id be said twice means an assistant
+    cannot arrive here by pattern-matching "clear out the old stuff" -- it has
+    to have the project in front of it and mean that one.
+
+    The gentler thing is usually what was wanted, so the description names it.
+    """
+    if (confirm or "").strip() != project_id:
+        return {"error": "to delete a project, pass confirm= the project's own id. Nothing was deleted.",
+                "code": "confirm_required", "project_id": project_id}
+
+    def go():
+        _client().projects.delete(project_id)
+        return {"deleted": project_id,
+                "note": "the project, its runs, its pages and its change record are gone"}
+    return _safe(go)
+
+
 @tool(description="Follow a job a long tool handed back: a crawl from crawl_site, a run from start_run, or a "
                          "batch from scrape_urls. Returns its status and counts, and once it has finished, the same "
                          "result the original tool would have given. kind: crawl | run | batch. A run needs its "
@@ -852,7 +895,7 @@ def get_job(kind: str, id: str, project_id: str | None = None,
     return _safe(go)
 
 
-# Stdio's server, built now that the seventeen are declared. Hosted mode
+# Stdio's server, built now that the twenty are declared. Hosted mode
 # builds its own in `authorize`, because auth is set in the constructor.
 server = _build()
 
@@ -979,7 +1022,7 @@ def _transport_security(public_url):
 
 
 def authorize(issuer, public, secret):
-    """The hosted server: the same seventeen tools, with OAuth attached.
+    """The hosted server: the same twenty tools, with OAuth attached.
 
     A server of its own rather than the stdio one with auth bolted on after
     the fact. `token_verifier` and `auth` are constructor arguments, and

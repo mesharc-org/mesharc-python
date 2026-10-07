@@ -400,3 +400,74 @@ def test_a_big_batch_accounts_for_every_url_inside_the_budget():
     assert rest["byStatus"] == {"ok": rest["count"] - 2, "blocked": 2}
     assert [r["url"].rsplit("-", 1)[1] for r in rest["notOk"]] == ["300", "420"]
     assert "of 500 urls" in out["note"] and "credits" in out["note"]
+
+
+# --- stopping work, and the one tool that cannot be undone ----------------
+
+class _Lifecycle:
+    """A client that records what it was asked to do."""
+
+    def __init__(self):
+        self.did = []
+        self.projects = self
+        self.runs = self
+
+    def cancel(self, project_id, run_id):
+        self.did.append(("cancel_run", project_id, run_id))
+        return {"id": run_id, "status": "cancelled"}
+
+    def delete(self, project_id):
+        self.did.append(("delete", project_id))
+
+    def get_crawl(self, crawl_id):
+        self.did.append(("get_crawl", crawl_id))
+        outer = self
+
+        class _C:
+            def cancel(self_inner):
+                outer.did.append(("stop_crawl", crawl_id))
+                return {"id": crawl_id, "status": "cancelled"}
+        return _C()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+
+def test_a_run_and_a_crawl_can_be_stopped(monkeypatch):
+    arc = _Lifecycle()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+    assert mcp_mod.cancel_run("p1", "r1")["status"] == "cancelled"
+    assert mcp_mod.stop_crawl("c1")["status"] == "cancelled"
+    assert ("cancel_run", "p1", "r1") in arc.did
+    assert ("stop_crawl", "c1") in arc.did
+
+
+def test_deleting_a_project_needs_its_id_said_twice(monkeypatch):
+    """The only tool here that cannot be undone. An assistant must not reach
+    it by pattern-matching "clear out the old stuff": it has to have the
+    project in front of it and mean that one."""
+    arc = _Lifecycle()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+
+    for confirm in ("", "yes", "p2", "P1", " "):
+        out = mcp_mod.delete_project("p1", confirm)
+        assert out["code"] == "confirm_required", confirm
+        assert "Nothing was deleted" in out["error"]
+    assert arc.did == [], "not one of those may have reached the API"
+
+    out = mcp_mod.delete_project("p1", "p1")
+    assert out["deleted"] == "p1"
+    assert arc.did == [("delete", "p1")]
+
+
+def test_the_gentler_thing_is_named_where_it_will_be_read():
+    """A project someone wants to stop crawling usually wants its schedule
+    changed, not its history destroyed -- so the tool that destroys says so
+    in the description the model reads before choosing."""
+    said = [h["description"] for fn, h in mcp_mod._TOOLS if fn is mcp_mod.delete_project][0]
+    assert "no undo" in said
+    assert "update_project" in said, "it has to name the thing to do instead"
+    assert "confirm" in said
