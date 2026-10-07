@@ -267,13 +267,14 @@ def test_a_read_only_connection_is_told_why_rather_than_about_roles(monkeypatch)
     assert out["code"] == "read_only"
     assert "approved read-only" in out["error"]
     assert "write access" in out["error"], "it has to say what would fix it"
+    assert "Also allow changes" in out["error"], "name the box on the consent screen"
     assert out["detail"] == "this needs the member role", "the API's own words are kept"
 
 
 def test_a_connection_with_write_hears_the_api(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_scopes", lambda: ["read", "write"])
     out = mcp_mod._safe(_refuse(403, "this needs the owner role", code="forbidden"))
-    assert out == {"error": "this needs the owner role", "status": 403}
+    assert out == {"error": "this needs the owner role", "status": 403, "code": "forbidden"}
 
 
 def test_the_other_refusals_keep_saying_what_they_say(monkeypatch):
@@ -284,7 +285,7 @@ def test_the_other_refusals_keep_saying_what_they_say(monkeypatch):
                          ("email_unverified", "verify your email address first"),
                          ("mfa_required", "this workspace requires two-factor authentication")):
         out = mcp_mod._safe(_refuse(403, detail, code=code))
-        assert out == {"error": detail, "status": 403}, code
+        assert out == {"error": detail, "status": 403, "code": code}, code
 
 
 def test_locally_the_server_does_not_guess_at_the_key(monkeypatch):
@@ -293,7 +294,19 @@ def test_locally_the_server_does_not_guess_at_the_key(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_HTTP", False)
     assert mcp_mod._scopes() is None
     out = mcp_mod._safe(_refuse(403, "this needs the member role", code="forbidden"))
-    assert out == {"error": "this needs the member role", "status": 403}
+    assert out == {"error": "this needs the member role", "status": 403, "code": "forbidden"}
+
+
+def test_an_error_carries_its_code_and_request_id():
+    """The code says why a call was refused and the request id is what
+    support looks it up by; dropping either leaves nobody able to act."""
+    from mesharc import MeshArcError
+
+    def boom():
+        raise MeshArcError(429, "slow down", code="rate_limited", request_id="req_1")
+    out = mcp_mod._safe(boom)
+    assert out == {"error": "slow down", "status": 429, "code": "rate_limited",
+                   "request_id": "req_1"}
 
 
 def test_a_webhook_signing_secret_never_reaches_an_assistant():
@@ -455,3 +468,126 @@ def test_long_urls_still_leave_room_for_five_excerpts():
     job = _Job([page(i) for i in range(500)])
     out = mcp_mod._crawl_result(job, job.pages())
     assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS and len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+
+
+# --- web_search, waited for down a pipe and bounded hosted ----------------
+
+class _Searches:
+    """Enough of a client for web_search and get_job's search branch: each
+    call takes the next answer, or raises what it was given."""
+
+    def __init__(self, *answers, raises=None):
+        self.answers, self.raises, self.calls = list(answers), raises, []
+
+    def web_search(self, query, **kw):
+        self.calls.append((query, kw))
+        if self.raises is not None:
+            raise self.raises
+        return self.answers.pop(0)
+
+    def get_search(self, id):
+        self.calls.append((id, {}))
+        return self.answers.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+
+def _hit(i, page=None):
+    h = {"position": i + 1, "title": f"Result {i}", "url": f"https://x.test/{i}",
+         "snippet": "s" * 160, "source": "organic", "engine": "google"}
+    if page is not None:
+        h["page"] = page
+    return h
+
+
+def _search(status="done", hits=(), **extra):
+    return {"id": "s1", "status": status, "query": "q", "engine": "google", "cached": False,
+            "creditsUsed": 3, "data": list(hits), **extra}
+
+
+def test_ten_scraped_results_stay_inside_the_budget(monkeypatch):
+    """Ten hits at a full page each is what a crawl used to answer with: the
+    pages come back as excerpts with a link count, inside the same promise."""
+    arc = _Searches(_search(hits=[_hit(i, _page(i)) for i in range(10)]))
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    out = mcp_mod.web_search("q", scrape=True)
+    size = len(json.dumps(out))
+    assert size <= mcp_mod.RESULT_BUDGET, f"{size:,} characters against a promise of {mcp_mod.RESULT_BUDGET:,}"
+    assert len(out["results"]) == 10
+    assert all(isinstance(r["page"]["links"], int) for r in out["results"])
+    assert "href" not in json.dumps(out), "not one link list survived"
+    assert all("call scrape_urls with that url" in r["page"]["markdown"] for r in out["results"])
+    (query, kw), = arc.calls
+    assert query == "q" and kw["scrape"] is True
+    assert "idempotency_key" not in kw, "a repeat search is a new search by design"
+
+
+def test_a_blocked_search_says_how_it_was_refused(monkeypatch):
+    blocked = _search(status="blocked", error="every engine refused the results page",
+                      attempts=[{"engine": "google", "status": 429}, {"engine": "bing", "status": 403}])
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(blocked))
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    out = mcp_mod.web_search("q")
+    assert out["status"] == "blocked" and out["results"] == []
+    assert out["error"] == "every engine refused the results page"
+    assert out["attempts"] == blocked["attempts"]
+
+
+def test_a_local_search_that_outlasts_the_clients_wait_hands_back_its_job(monkeypatch):
+    arc = _Searches(raises=mcp_mod.MeshArcTimeoutError("still running", "s9"))
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    out = mcp_mod.web_search("q")
+    assert out["status"] == "running" and out["job"] == {"kind": "search", "id": "s9"}
+
+
+def test_hosted_web_search_asks_once_inside_its_budget(monkeypatch):
+    """No poll loop down the socket: one call that the API holds for the
+    budget less five seconds, and whatever it has comes back."""
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: 25.0)
+    monkeypatch.setattr(mcp_mod, "_scopes", lambda: ["read", "write"])
+
+    arc = _Searches(_search(status="queued"))
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+    out = mcp_mod.web_search("q")
+    (_query, kw), = arc.calls
+    assert kw["wait"] is False and kw["timeout_s"] == 20.0
+    assert out["status"] == "running" and out["job"] == {"kind": "search", "id": "s1"}
+    assert "results" not in out
+
+    arc = _Searches(_search(status="running", hits=[_hit(i) for i in range(3)]))
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+    out = mcp_mod.web_search("q", scrape=True)
+    assert [r["url"] for r in out["results"]] == [f"https://x.test/{i}" for i in range(3)]
+    assert out["job"] == {"kind": "search", "id": "s1"}
+    assert "get_job" in out["note"]
+
+    arc = _Searches(_search(status="error", error="every engine failed"))
+    monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+    out = mcp_mod.web_search("q")
+    assert out == {"error": "every engine failed", "status": 502, "code": "job_failed"}
+
+
+def test_get_job_follows_a_search(monkeypatch):
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(_search(status="queued")))
+    out = mcp_mod.get_job("search", "s1")
+    assert out["status"] == "running" and out["job"] == {"kind": "search", "id": "s1"}
+
+    done = _search(hits=[_hit(i, _page(i)) for i in range(4)])
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(done))
+    polled = mcp_mod.get_job("search", "s1")
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(done))
+    waited = mcp_mod.web_search("q", scrape=True)
+    assert polled == waited, "what an assistant gets by polling is what it would have got by waiting"
+    assert "job" not in polled
+
+    monkeypatch.setattr(mcp_mod, "_client",
+                        lambda: _Searches(_search(status="error", error="every engine failed")))
+    out = mcp_mod.get_job("search", "s1")
+    assert out == {"error": "every engine failed", "status": 502, "code": "job_failed"}

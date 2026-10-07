@@ -257,6 +257,6 @@ def test_an_error_and_an_unknown_field_both_come_through_a_real_call(monkeypatch
     c = _Failing()
     monkeypatch.setattr(mcp_mod, "_client", lambda: c)
     bad = asyncio.run(mcp_mod.server.call_tool("list_pages", {"project_id": "p1", "q": "x"}))
-    assert bad.structured_content == {"error": "no such project", "status": 404}
+    assert bad.structured_content == {"error": "no such project", "status": 404, "code": "not_found"}
     good = asyncio.run(mcp_mod.server.call_tool("list_pages", {"project_id": "p1"}))
     assert good.structured_content["aFieldAddedLater"] == {"n": 1}

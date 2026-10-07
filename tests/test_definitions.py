@@ -12,6 +12,12 @@ import pytest
 
 mcp_mod = pytest.importorskip("mesharc.mcp", reason="needs the mcp extra")
 
+# Every tool the server offers. Adding one is a line here, not a count to
+# find and bump.
+EXPECTED = {"scrape_urls", "map_site", "crawl_site", "web_search", "list_projects", "get_project",
+            "create_project", "update_project", "delete_project", "list_runs", "list_pages", "get_page",
+            "get_changes", "start_run", "get_job", "cancel_job"}
+
 # The tools that only read what the workspace has stored. Everything else
 # reaches a site or changes the workspace, and a read-only connection is
 # refused it -- the same seven the read_only answer is about.
@@ -22,10 +28,11 @@ def _tools():
     return {t.name: t for t in asyncio.run(mcp_mod.server.list_tools())}
 
 
-def test_all_fifteen_are_listed():
+def test_every_tool_is_listed():
     # 0.4.0 folded five tools into the siblings they overlapped and added
-    # delete_project: nineteen became fifteen.
-    assert len(_tools()) == 15
+    # delete_project, nineteen becoming fifteen; web_search makes sixteen.
+    assert set(_tools()) == EXPECTED
+    assert READ_ONLY < EXPECTED
 
 
 def test_every_parameter_is_described():
@@ -65,7 +72,8 @@ def test_fixed_choices_are_listed():
         options = [schema] + list(schema.get("anyOf") or [])
         return next(o["enum"] for o in options if "enum" in o)
 
-    assert enum("get_job", "kind") == ["crawl", "run", "batch"]
+    assert enum("get_job", "kind") == ["crawl", "run", "batch", "search"]
+    # A web search cannot be stopped: the API has no cancel for one.
     assert enum("cancel_job", "kind") == ["crawl", "run", "batch"]
     assert enum("list_pages", "mode") == ["content", "selector"]
     for tool in ("create_project", "update_project"):

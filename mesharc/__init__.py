@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl"]
 
 DEFAULT_BASE = "https://api.mesharc.dev"
@@ -486,6 +486,87 @@ class MeshArc:
         if out.get("status") != "done":
             raise MeshArcError(502, out.get("error") or "no sitemap could be read", "job_failed")
         return out
+
+    def web_search(self, query: str, limit: Optional[int] = None, country: Optional[str] = None,
+                   lang: Optional[str] = None, freshness: Optional[str] = None,
+                   include_domains: Optional[Iterable[str]] = None, exclude_domains: Optional[Iterable[str]] = None,
+                   scrape: Union[bool, Json, None] = None, destination: Optional[str] = None, wait: bool = True,
+                   timeout_s: Optional[float] = None, poll: float = 2.0, timeout: float = 600,
+                   idempotency_key: Optional[str] = None) -> Json:
+        """Search the web. Returns the whole envelope, the hits under ``data``.
+
+        Needs an API key that can write, and spends credits: a results page
+        every engine refused is free, an equal search (same query,
+        ``country``, ``lang``, ``freshness`` and domains) within the hour of
+        a finished one comes from the cache with no results-page charge, and
+        scraped pages are charged even then. ``freshness`` is ``hour``, ``day``,
+        ``week``, ``month`` or ``year``. ``scrape=True`` also fetches each
+        hit as markdown; a dict such as ``{"formats": ["markdown", "links"],
+        "maxCredits": 20}`` is sent as given. The formats are ``markdown``,
+        ``text``, ``rawHtml``, ``cleanHtml``, ``links``, ``raw``,
+        ``screenshot`` and ``json``. A search that scrapes stays ``running``
+        until its pages land, with the hits already in ``data``.
+
+        A ``blocked`` search (every engine refused) is returned, not
+        raised; ``error`` raises ``MeshArcError``. ``timeout_s`` is how
+        long the API holds the request open (60 by default when waiting,
+        120 at most); a slower search is then polled every ``poll`` seconds
+        for up to ``timeout`` seconds. ``wait=False`` returns at once,
+        queued or running, unless ``timeout_s`` is given.
+        """
+        body: Json = {"query": query}
+        for key, value in (("limit", limit), ("country", country), ("lang", lang), ("freshness", freshness),
+                           ("destination", destination)):
+            if value is not None:
+                body[key] = value
+        if include_domains is not None:
+            body["includeDomains"] = list(include_domains)
+        if exclude_domains is not None:
+            body["excludeDomains"] = list(exclude_domains)
+        if scrape is True:
+            body["scrape"] = {"formats": ["markdown"]}
+        elif isinstance(scrape, dict):
+            body["scrape"] = scrape
+        body["timeout"] = timeout_s if timeout_s is not None else (60 if wait else 0)
+        out = self._h("POST", "/search", json=body, idempotency_key=idempotency_key)
+        if not wait:
+            return out
+        deadline = time.time() + timeout
+        while True:
+            if out.get("status") in ("done", "blocked"):
+                return out
+            if not _running(out.get("status")):
+                raise MeshArcError(502, out.get("error") or f"search {out.get('status')}", "job_failed")
+            if time.time() >= deadline:
+                raise MeshArcTimeoutError(f"search {out['id']} is still {out['status']} after {timeout}s", out["id"])
+            time.sleep(poll)
+            self._h.pace()
+            out = self._h("GET", f"/search/{out['id']}")
+
+    def get_search(self, search_id: str) -> Json:
+        """A web search started earlier, as ``web_search`` returns it."""
+        return self._h("GET", f"/search/{search_id}")
+
+    def searches(self, q: Optional[str] = None, limit: int = 25) -> Iterator[Json]:
+        """Every web search of the workspace, as summaries.
+
+        ``q`` filters the list by query; ``limit`` is the page size, sent
+        again with ``q`` on every page. Follows the ``next`` link until the
+        list ends.
+        """
+        cursor = ""
+        while True:
+            params: Dict[str, Any] = {"limit": limit}
+            if q:
+                params["q"] = q
+            if cursor:
+                params["cursor"] = cursor
+            page = self._h("GET", "/search", params=params)
+            for row in page.get("data") or []:
+                yield row
+            cursor = _cursor_of(page["next"]) if page.get("next") else ""
+            if not cursor:
+                return
 
     def pages(self, project_id: str, run_id: Optional[str] = None) -> Json:
         """The pages of a run (the latest finished run by default)."""
