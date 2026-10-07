@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.5.0 - 2026-10-07
+
 ### Added
 
 - **The client searches the web, for pages whose URLs you do not know.** `web_search(query, limit=, country=, lang=, freshness=, include_domains=, exclude_domains=, scrape=, ...)` returns the whole envelope, the hits under `data`; `scrape=True` also fetches each hit as markdown. `get_search(id)` reopens a search started earlier, and `searches(q=None, limit=25)` walks the workspace's searches, following `next`. A search is `queued`, `running`, `done`, `blocked` or `error`: `blocked` (every engine refused) is returned, `error` raises `MeshArcError`. It needs a key that can write, and spends credits: a results page every engine refused is free, an equal search (same query, `country`, `lang`, `freshness` and domains) within an hour of a finished one comes from the cache with no results-page charge, and scraped pages are always charged. `search()` is unchanged and is still the project search. **This needs an API that has the `/search` route**, which is live on mesharc.dev.
