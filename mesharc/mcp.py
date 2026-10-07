@@ -83,7 +83,8 @@ INSTRUCTIONS = (
     "crawl_site to crawl a whole site once without setting a project up first "
     "(keep_crawl_as_project turns one of those into a watched project afterwards). "
     "The project tools are for a site watched over time: its pages, its change record, "
-    "and search inside a run. Blocked pages are reported as blocked, never as missing."
+    "and search inside a run. A long tool may hand back a job: get_job follows it and cancel_job stops it. "
+    "Blocked pages are reported as blocked, never as missing."
 )
 
 # The tools, in the order they are declared, with how each was registered.
@@ -92,7 +93,7 @@ INSTRUCTIONS = (
 # on a second server later, built with auth in its constructor. The registry is
 # what carries the descriptions across: a description is the only thing an
 # assistant has to pick a tool by, and re-registering without them would leave
-# seventeen nameless verbs.
+# nineteen nameless verbs.
 _TOOLS: "list[tuple]" = []
 
 # What each tool does to the world, in the hints MCP clients read. A tool that
@@ -111,7 +112,7 @@ def _acts(*, destructive=False, idempotent=False, open_world=True):
 # The parameters most tools share, described once.
 ProjectId = Annotated[str, Field(description="The project's id, as list_projects or create_project returns it.")]
 RunId = Annotated[str | None, Field(
-    description="A run's id, from start_run or the runId a list_pages answer carries; "
+    description="A run's id, from list_runs, start_run or the runId a list_pages answer carries; "
                 "leave empty for the last finished run.")]
 Schedule = Literal["manual", "hourly", "daily", "weekly"]
 FetchConfig = Annotated[dict | None, Field(
@@ -533,7 +534,7 @@ def _scopes():
     return list(getattr(at, "scopes", None) or []) if at else []
 
 
-# Nine of the seventeen tools need write, including every one that fetches a
+# Ten of the nineteen tools need write, including every one that fetches a
 # page: fetching spends the workspace's credits, so it is not a read however
 # it reads to an assistant asking for one URL. The API answers "this needs the
 # member role", which is true and tells an assistant nothing it can act on --
@@ -966,8 +967,8 @@ def update_project(project_id: ProjectId,
                   "a few pages use recrawl_pages. For a site with no project use crawl_site.\n"
                   "Cost: every page read costs credits (usually 1 to 4). A run stops when the credit budget runs "
                   "out and keeps what it read.\n"
-                  "Refusals: 409 while a run of the project is already queued or running, and 402 when no credits "
-                  "are left.\n"
+                  "Refusals: 409 while a run of the project is already queued or running (cancel_job stops it), and "
+                  "402 when no credits are left.\n"
                   "Returns: without wait, the queued run at once. With wait, the finished run, except hosted, where "
                   "a run still going after the time budget comes back as a job for get_job. Read the results with "
                   "list_pages and get_changes.\n"
@@ -987,6 +988,37 @@ def start_run(project_id: ProjectId,
         except MeshArcTimeoutError as exc:
             return _still_running("run", getattr(exc, "job_id", "") or "",
                                   project_id=project_id)
+    return _safe(go)
+
+
+# A run as list_runs shows it: what an assistant needs to pick one, without
+# the config, link graph and engine profile a run record also carries.
+RUN_FIELDS = ("id", "status", "trigger", "scope", "pagesN", "changedN", "counts", "coverage", "stop",
+              "startedAt", "elapsed", "baseline", "rebaselined")
+
+
+@tool(title="List a project's runs",
+      annotations=READS_STORED,
+      description="List a project's runs, newest first, with each run's id, status, trigger, pages read, pages "
+                  "changed, coverage, stop reason and start time.\n"
+                  "Use it to find a run_id for list_pages, get_page, get_changes or search_pages, to see whether a "
+                  "run is still going before start_run, or to pick the run to stop with cancel_job. get_project "
+                  "shows only the last run.\n"
+                  "Inputs: `limit` caps how many come back (1 to 100, default 25). Older runs are not paged here.\n"
+                  "Returns: {runs: [{id, status, trigger, scope, pagesN, changedN, counts, coverage, stop, "
+                  "startedAt, elapsed, baseline, rebaselined}]}. trigger is manual, scheduled, api or recrawl; "
+                  "scope is how many URLs a recrawl_pages run listed (0 for a full run); changedN is null before a "
+                  "run has a change record.\n"
+                  "Works on a read-only connection. Free: it reads stored data and never fetches. Errors return "
+                  "{error, status}.")
+def list_runs(project_id: ProjectId,
+              limit: Annotated[int, Field(
+                  description="How many runs to return, newest first: 1 to 100 (default 25).")] = 25) -> dict:
+    """The runs of one project, so a run id can be found without guessing:
+    the tools that read a run take one, and get_project shows only the last."""
+    def go():
+        rows = _client().runs.list(project_id, limit=max(1, min(limit, 100)))
+        return {"runs": [{k: r.get(k) for k in RUN_FIELDS} for r in rows]}
     return _safe(go)
 
 
@@ -1028,7 +1060,7 @@ def get_page(project_id: ProjectId,
                  description="The page's full URL as list_pages or search_pages shows it; the other scheme or "
                              "trailing slash is matched too.")],
              run_id: Annotated[str | None, Field(
-                 description="A run's id, from start_run or a list_pages answer, to read that run's copy; leave "
+                 description="A run's id, from list_runs or start_run, to read that run's copy; leave "
                              "empty for the newest copy across the project's recent runs.")] = None) -> dict:
     return _safe(lambda: _trim_page(_client().page(project_id, url, run_id)))
 
@@ -1094,7 +1126,7 @@ def search_pages(project_id: ProjectId,
                   "is refused with 400 naming it, before anything runs.\n"
                   "Cost: each page costs credits (usually 1 to 4). A page that fails is recorded in the run with "
                   "its status, not dropped.\n"
-                  "Refusals: 409 while another run of the project is queued or running.\n"
+                  "Refusals: 409 while another run of the project is queued or running; cancel_job stops it.\n"
                   "Returns: the queued run. Follow it with get_job (kind 'run') and read the results with "
                   "get_changes.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
@@ -1111,7 +1143,8 @@ def recrawl_pages(project_id: ProjectId,
       description="Check on a job a long tool handed back (a crawl from crawl_site, a run from start_run or "
                   "recrawl_pages, or a batch from scrape_urls) and return its result once it has finished.\n"
                   "Call it when a tool answered with status 'running' and a job. Calling the original tool again is "
-                  "not needed and would not start a second job. For a project's stored pages use get_page instead.\n"
+                  "not needed and would not start a second job. For a project's stored pages use get_page instead. "
+                  "To stop a job use cancel_job.\n"
                   "Inputs: for a crawl, `url` returns one page in full (even mid-crawl) and `cursor` the next "
                   "window of pages.\n"
                   "Returns: while it runs, {status: 'running', job, counts}. Once finished, a crawl gives "
@@ -1181,7 +1214,78 @@ def get_job(kind: Annotated[Literal["crawl", "run", "batch"], Field(
     return _safe(go)
 
 
-# Stdio's server, built now that the seventeen are declared. Hosted mode
+# What a stop means, said once for every kind of job.
+CANCEL_NOTE = ("queued work is dropped at once; a page being read finishes first, then the job "
+               "stops. Pages already read stay readable, and nothing is deleted.")
+
+
+@tool(title="Cancel a running job",
+      annotations=_acts(destructive=True, idempotent=True, open_world=False),
+      description="Stop a crawl, run or batch that is still going: a crawl started too wide, a run that blocks the "
+                  "next one, or a batch of the wrong URLs.\n"
+                  "Use it when the work should not finish. To check on a job without stopping it use get_job. "
+                  "start_run and recrawl_pages answer 409 while a run is going, so stop that run here first.\n"
+                  "Inputs: `kind` and `id` come from the 'job' object a long tool returned, or from crawl_site's "
+                  "crawl_id. A run also needs its project_id; list_runs shows which of a project's runs is still "
+                  "going.\n"
+                  "Behaviour: queued work is dropped at once, and a page being read finishes first. Pages already "
+                  "read stay readable and nothing is deleted. It cannot be undone: run the work again to resume. A "
+                  "job that already finished is left as it is.\n"
+                  "Returns: {kind, id, outcome, note}. outcome is 'cancelled' (it never started), 'cancelling' (it "
+                  "stops after the page in hand), or the status of a job that had already ended.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'. Errors return "
+                  "{error, status}.")
+def cancel_job(kind: Annotated[Literal["crawl", "run", "batch"], Field(
+                   description="What the job is: 'crawl' (crawl_site), 'run' (start_run, recrawl_pages) or "
+                               "'batch' (scrape_urls); the 'job' object a tool returned names it.")],
+               id: Annotated[str, Field(
+                   description="The job's id, from that 'job' object, or a crawl_site answer's crawl_id.")],
+               project_id: Annotated[str | None, Field(
+                   description="Required for a run: the project it belongs to (the 'job' object carries "
+                               "it). Ignored for a crawl or a batch.")] = None) -> dict:
+    """The way out of a job that should not finish: a crawl started too wide, a
+    run that blocks the next one (start_run and recrawl_pages answer 409 while
+    one is going), a batch of the wrong URLs. Every kind stops the same way,
+    through the API's own cancel; a job already finished is left as it is and
+    reported with its status (a crawl or batch is checked first and nothing is
+    sent; a run's cancel goes to the API, which changes nothing on a finished
+    run), so asking twice is harmless."""
+    def go():
+        s = _client()
+        if kind == "run":
+            if not project_id:
+                return {"error": "a run needs its project_id", "code": "validation"}
+            r = s.runs.cancel(project_id, id) or {}
+            # The API says what it did: cancelled (it never started), cancelling
+            # (it stops after the page in hand), or the status of a run that had
+            # already ended.
+            return {"kind": "run", "id": id, "project_id": project_id,
+                    "outcome": r.get("outcome") or "no job", "note": CANCEL_NOTE}
+        if kind == "crawl":
+            job = s.get_crawl(id)
+            status = job.envelope.get("status")
+            if not _running(status):
+                return {"kind": "crawl", "id": id, "outcome": status,
+                        "note": "the crawl had already finished; nothing to stop"}
+            job.cancel()
+            return {"kind": "crawl", "id": id,
+                    "outcome": "cancelled" if status == "queued" else "cancelling", "note": CANCEL_NOTE}
+        if kind == "batch":
+            # Only the status is wanted: a format the API does not keep a body
+            # for returns the rows without markdown, where the default would
+            # carry every page of a finished 500-url batch just to read one word.
+            status = s.batch(id, formats="none").get("status")
+            if not _running(status):
+                return {"kind": "batch", "id": id, "outcome": status,
+                        "note": "the batch had already finished; nothing to stop"}
+            s.cancel_batch(id)
+            return {"kind": "batch", "id": id,
+                    "outcome": "cancelled" if status == "queued" else "cancelling", "note": CANCEL_NOTE}
+        return {"error": f"kind must be crawl, run or batch, not {kind!r}", "code": "validation"}
+    return _safe(go)
+
+
+# Stdio's server, built now that the nineteen are declared. Hosted mode
 # builds its own in `authorize`, because auth is set in the constructor.
 server = _build()
 
@@ -1308,7 +1412,7 @@ def _transport_security(public_url):
 
 
 def authorize(issuer, public, secret):
-    """The hosted server: the same seventeen tools, with OAuth attached.
+    """The hosted server: the same nineteen tools, with OAuth attached.
 
     A server of its own rather than the stdio one with auth bolted on after
     the fact. `token_verifier` and `auth` are constructor arguments, and

@@ -6,6 +6,23 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.3.4 - 2026-10-07
+
+### Added
+
+- **`cancel_job(kind, id, project_id=None)`**, an eighteenth MCP tool: it stops a crawl, run or batch that is still going. It's the counterpart to `get_job`.
+  - Until now an assistant had no way out of a job that should not finish. `start_run` and `recrawl_pages` answer 409 while a run is going, and nothing could stop that run.
+  - It uses the API's existing cancels: `POST /projects/{id}/runs/{run_id}/cancel`, `DELETE /crawl/{id}` and `DELETE /scrape/{id}`.
+  - Queued work is dropped at once, and a page being read finishes first. Pages already read stay readable, and nothing is deleted.
+  - A job that already finished is left as it is and reported with its status, so asking twice is harmless.
+  - It needs write access and is marked destructive (a stop cannot be resumed).
+- **`list_runs(project_id, limit=25)`**, a nineteenth MCP tool. It lists a project's runs newest first, so an assistant can find a run id for `list_pages`, `get_page`, `get_changes` or `search_pages`, see whether a run is still going before `start_run`, or pick the one to stop. Until now only `get_project`'s last run and `start_run`'s answer gave a run id. It's read-only, over the existing `GET /projects/{id}/runs`, and keeps only the fields that pick a run (no config, link graph or engine profile).
+- **`MeshArc.cancel_batch(batch_id)`**: stops a scrape batch, or a one-URL scrape still going. It's the client's counterpart to `Crawl.cancel()` and `runs.cancel()`.
+
+### Changed
+
+- `start_run`, `recrawl_pages` and `get_job` say that `cancel_job` stops a running job; `cancel_job` and the `run_id` parameters point to `list_runs`. The server's instructions and the README name them too.
+
 ## 0.3.3 - 2026-10-07
 
 ### Changed
