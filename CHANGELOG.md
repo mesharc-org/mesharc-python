@@ -6,6 +6,23 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.6.0 - 2026-10-07
+
+Two MCP tool names change, so **this breaks anything that calls `web_search` or `get_page` by name**; both still do what they did, under the new names below. The Python client's API is unchanged apart from two additions: `web_search()` keeps its name there.
+
+### Changed
+
+- **`web_search` is now `search_web`**, a verb first like every other tool (`get_page`, `list_runs`, `start_run`). Glama's grader marked the set down for the one name that was not.
+- **`get_page` is folded into `list_pages`**: `list_pages(project_id, url=...)` reads one stored page in full, with its versions, exactly as `get_page` did; without `url` it lists, and with `q` it searches. Giving `url` and `q` together is refused. That keeps the server at fifteen tools, inside the band Glama scores in full, and removes a pair it named as easy to confuse.
+- `update_project` is no longer marked idempotent or closed-world: with `test_webhook=true` it sends a message to the project's webhook endpoint, and a repeat sends another.
+
+### Added
+
+- **Webhooks, managed through the project tools.** `get_project` shows a project's webhook URL, its events, and the last ten deliveries with their status (queued, retrying, delivered or failed), attempts and last error, without the payload or the signing secret. It reads them from the deliveries list, which writes nothing. `update_project` already set `webhook_url` and `webhook_events` through `config`; its description now says so, and `test_webhook=true` queues a test `run.finished` message after any changes. A refused test (no URL saved) is reported under `webhookTest` and does not undo the change.
+- **Any two runs compared.** `get_changes(project_id, run_id, against=...)` compares a run with any other run of the project, "what changed since last month", where it could only compare a run with the one just before. The API already offered it (`?against=`); the client's `changes()` takes `against=` too. Nothing is stored.
+- **The credit balance before a large crawl.** `list_projects` answers with `workspace: {plan, creditsLeft, creditsSpentThisMonth, oneTimeAllowance}` beside the projects, read from `GET /me/billing`, so an assistant can check before it spends rather than learn it from a 402. A balance that cannot be read is a note, never a failed call.
+- **`MeshArc.webhook_deliveries(project_id, limit=50)`**, **`MeshArc.test_webhook(project_id)`** and **`MeshArc.billing()`** in the client, over `GET /webhooks/deliveries`, `POST /projects/{id}/webhooks/test` and `GET /me/billing`.
+
 ## 0.5.0 - 2026-10-07
 
 ### Added

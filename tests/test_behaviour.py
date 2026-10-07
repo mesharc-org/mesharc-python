@@ -203,7 +203,7 @@ def test_pace_waits_out_the_window_only_when_nearly_out(monkeypatch):
 
 def test_the_mcp_server_offers_the_verbs_and_the_config_tools():
     source = (pathlib.Path(mesharc.__file__).parent / "mcp.py").read_text(encoding="utf-8")
-    for name in ("scrape_urls", "map_site", "crawl_site", "web_search", "list_projects", "get_changes",
-                 "get_job", "cancel_job", "list_runs", "list_pages", "get_page", "start_run", "get_project",
+    for name in ("scrape_urls", "map_site", "crawl_site", "search_web", "list_projects", "get_changes",
+                 "get_job", "cancel_job", "list_runs", "list_pages", "start_run", "get_project",
                  "create_project", "update_project", "delete_project"):
         assert f"def {name}(" in source, name

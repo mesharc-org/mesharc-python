@@ -84,7 +84,7 @@ INSTRUCTIONS = (
     "crawl_site to crawl a whole site once without setting a project up first "
     "(create_project with its crawl_id turns it into a watched project afterwards). "
     "The project tools are for a site watched over time: its runs, its pages, search inside a run, "
-    "and its change record. web_search searches the web for pages whose URLs you do not know; "
+    "and its change record. search_web searches the web for pages whose URLs you do not know; "
     "list_pages with q searches only inside a project's run. "
     "A long tool may hand back a job: get_job follows it and cancel_job stops it. "
     "Blocked pages are reported as blocked, never as missing."
@@ -96,7 +96,7 @@ INSTRUCTIONS = (
 # on a second server later, built with auth in its constructor. The registry is
 # what carries the descriptions across: a description is the only thing an
 # assistant has to pick a tool by, and re-registering without them would leave
-# sixteen nameless verbs.
+# fifteen nameless verbs.
 _TOOLS: "list[tuple]" = []
 
 # What each tool does to the world, in the hints MCP clients read. A tool that
@@ -202,7 +202,8 @@ class CrawlOut(TypedDict, total=False):
 
 @with_config(ConfigDict(extra="allow"))
 class ProjectOut(TypedDict, total=False):
-    """A project, or with no project_id the settings any project can take."""
+    """A project, as get_project, create_project and update_project answer with it; get_project with no
+    project_id answers with the settings any project can take instead."""
     id: Annotated[Any, Field(description="The project's 32-character hex id.")]
     name: Annotated[Any, Field(description="Its display name.")]
     seed: Annotated[Any, Field(description="Where its crawls start.")]
@@ -220,6 +221,13 @@ class ProjectOut(TypedDict, total=False):
     nextRunAt: Annotated[Any, Field(description="When the schedule runs it next, or null for manual.")]
     changeSummary: Annotated[Any, Field(description=(
         "The last compared run in words, e.g. '3 new · 2 changed · 0 removed'."))]
+    webhooks: Annotated[Any, Field(description=(
+        "get_project only: {url, events, deliveries}: where run and change events are POSTed, which events, and "
+        "the last 10 deliveries, each {id, event, status (queued, retrying, delivered or failed), attempts, "
+        "lastStatus, lastError, createdAt, deliveredAt}. The signing secret is never included."))]
+    webhookTest: Annotated[Any, Field(description=(
+        "update_project with test_webhook only: {queued, id} when a test run.finished message was queued, or "
+        "{error, status} when the API refused it, e.g. with no webhook URL saved."))]
     settings: Annotated[Any, Field(description=(
         "No project_id only: every common setting as {key, meaning, default}."))]
     other_keys: Annotated[Any, Field(description="No project_id only: further keys accepted but rarely needed.")]
@@ -251,6 +259,10 @@ class ProjectsOut(TypedDict, total=False):
     projects: Annotated[Any, Field(description=(
         "Oldest first, each {id, name, seed, host, schedule, pages, coverage, lastRun, status}; status is draft, "
         "crawling, healthy or failing."))]
+    workspace: Annotated[Any, Field(description=(
+        "{plan, creditsLeft, creditsSpentThisMonth, oneTimeAllowance}: creditsLeft is what may still be spent, "
+        "this month or, on a one-time allowance, ever; null means no limit. {note} instead when the balance could "
+        "not be read."))]
     error: Annotated[Any, Field(description=_ERR)]
     status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
     code: Annotated[Any, Field(description=_CODE)]
@@ -261,7 +273,7 @@ class ProjectsOut(TypedDict, total=False):
 class RunOut(TypedDict, total=False):
     """A run of a project, or a job when a wait ran out first."""
     id: Annotated[Any, Field(description=(
-        "The run's id: for get_job, cancel_job and the run_id of list_pages, get_page and get_changes."))]
+        "The run's id: for get_job, cancel_job and the run_id of list_pages and get_changes."))]
     status: Annotated[Any, Field(description=(
         "running, complete, partial (some pages refused), failed or cancelled. On an error, the HTTP status code."))]
     queued: Annotated[Any, Field(description="true while it waits for a worker.")]
@@ -297,54 +309,46 @@ class RunsOut(TypedDict, total=False):
 
 @with_config(ConfigDict(extra="allow"))
 class PagesOut(TypedDict, total=False):
-    """A run's pages, or with q the pages that match."""
+    """A run's pages; with q the pages that match; with url one page in full."""
     runId: Annotated[Any, Field(description=(
-        "The run these pages are from; null when the project has no finished run."))]
+        "The run these pages are from (with url, the run this copy is from); null when the project has no "
+        "finished run."))]
     pages: Annotated[Any, Field(description=(
-        "Without q: up to 500 rows, shallowest first, each {url, path, status, depth, words, changed, title, "
+        "Listing: up to 500 rows, shallowest first, each {url, path, status, depth, words, changed, title, "
         "crawledAt}."))]
     linkGraph: Annotated[Any, Field(description=(
-        "Without q: the run's link-graph summary (orphans, unlisted pages, dead ends), or null."))]
+        "Listing: the run's link-graph summary (orphans, unlisted pages, dead ends), or null."))]
     hits: Annotated[Any, Field(description=(
         "With q: up to 500 matches, each {url, count (matches on the page), snippet}."))]
     scanned: Annotated[Any, Field(description="With q: pages searched.")]
     noBody: Annotated[Any, Field(description=(
         "With q: pages skipped because the body the mode needs was not kept (rawHtml for selector)."))]
     truncated: Annotated[Any, Field(description="With q: true when more pages matched than are listed.")]
-    error: Annotated[Any, Field(description=_ERR)]
-    status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
-    code: Annotated[Any, Field(description=_CODE)]
-    detail: Annotated[Any, Field(description=_DETAIL)]
-
-
-@with_config(ConfigDict(extra="allow"))
-class PageOut(TypedDict, total=False):
-    """One stored page in full."""
-    url: Annotated[Any, Field(description="The page's URL as stored.")]
-    runId: Annotated[Any, Field(description="The run this copy is from.")]
+    url: Annotated[Any, Field(description="With url: the page's URL as stored.")]
     pageStatus: Annotated[Any, Field(description=(
-        "ok, blocked, captcha, missing (404/410), timeout, redirect, robots or skipped."))]
-    words: Annotated[Any, Field(description="Words in its markdown.")]
-    markdown: Annotated[Any, Field(description="Its main content as markdown, capped at 12,000 characters.")]
-    text: Annotated[Any, Field(description="Plain text, when kept.")]
-    cleanHtml: Annotated[Any, Field(description="Simplified html, when kept.")]
-    html: Annotated[Any, Field(description="The raw html, when the run kept it.")]
-    head: Annotated[Any, Field(description="{title, description, canonical, h1, ...}.")]
-    fields: Annotated[Any, Field(description="Fields the project's json_schema extracted, or null.")]
+        "With url: ok, blocked, captcha, missing (404/410), timeout, redirect, robots or skipped."))]
+    words: Annotated[Any, Field(description="With url: words in its markdown.")]
+    markdown: Annotated[Any, Field(description=(
+        "With url: its main content as markdown, capped at 12,000 characters."))]
+    text: Annotated[Any, Field(description="With url: plain text, when kept.")]
+    cleanHtml: Annotated[Any, Field(description="With url: simplified html, when kept.")]
+    html: Annotated[Any, Field(description="With url: the raw html, when the run kept it.")]
+    head: Annotated[Any, Field(description="With url: {title, description, canonical, h1, ...}.")]
+    fields: Annotated[Any, Field(description="With url: fields the project's json_schema extracted, or null.")]
     versions: Annotated[Any, Field(description=(
-        "Every stored copy across runs, newest first, each {runId, crawledAt, contentHash, words, status}; a changed "
-        "contentHash is a changed page."))]
-    crawledAt: Annotated[Any, Field(description="When this copy was read (ISO 8601).")]
+        "With url: every stored copy across runs, newest first, each {runId, crawledAt, contentHash, words, "
+        "status}; a changed contentHash is a changed page."))]
+    crawledAt: Annotated[Any, Field(description="With url: when this copy was read (ISO 8601).")]
     error: Annotated[Any, Field(description=_ERR)]
     status: Annotated[Any, Field(description=(
-        "The HTTP status the site answered; on an error, the API's status code."))]
+        "With url: the HTTP status the site answered. On an error, the API's status code."))]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
 
 
 @with_config(ConfigDict(extra="allow"))
 class ChangesOut(TypedDict, total=False):
-    """A run's change record against the run before it."""
+    """A run's change record against the run before it, or against the run named in `against`."""
     change: Annotated[Any, Field(description=(
         "{runId, prevRunId, baseline, rebaselined, coverage, degraded, counts {added, modified, removed}, summary, "
         "feed, fields, withheld}. feed: each changed page as {url, path, kind (added, modified or removed), added "
@@ -362,7 +366,7 @@ class ChangesOut(TypedDict, total=False):
 @with_config(ConfigDict(extra="allow"))
 class JobOut(TypedDict, total=False):
     """A job's state, or its result once finished: a crawl gives crawl_site's answer, a batch scrape_urls',
-    a search web_search's, a run the run record, and `url` one page in full."""
+    a search search_web's, a run the run record, and `url` one page in full."""
     status: Annotated[Any, Field(description=(
         "'running' while it goes on; otherwise the finished job's status. On an error, the HTTP status code."))]
     job: Annotated[Any, Field(description="While running: {kind, id, project_id} to call again with.")]
@@ -374,7 +378,7 @@ class JobOut(TypedDict, total=False):
     markdown: Annotated[Any, Field(description="With url: that page's markdown, capped at 12,000 characters.")]
     id: Annotated[Any, Field(description="A run or a search: its id.")]
     results: Annotated[Any, Field(description=(
-        "A search: the ranked results, as web_search returns them, with page excerpts when it scraped."))]
+        "A search: the ranked results, as search_web returns them, with page excerpts when it scraped."))]
     note: Annotated[Any, Field(description="What to do next.")]
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
@@ -398,7 +402,7 @@ class CancelOut(TypedDict, total=False):
 
 
 @with_config(ConfigDict(extra="allow"))
-class WebSearchOut(TypedDict, total=False):
+class SearchWebOut(TypedDict, total=False):
     """A web search: the ranked results, with an excerpt of each page when scraped, or a job when it is still
     going."""
     id: Annotated[Any, Field(description="The search's id: for get_job with kind 'search'.")]
@@ -834,7 +838,7 @@ def _scopes():
     return list(getattr(at, "scopes", None) or []) if at else []
 
 
-# Nine of the sixteen tools need write, including every one that fetches a
+# Nine of the fifteen tools need write, including every one that fetches a
 # page: fetching spends the workspace's credits, so it is not a read however
 # it reads to an assistant asking for one URL. The API answers "this needs the
 # member role", which is true and tells an assistant nothing it can act on --
@@ -900,7 +904,7 @@ def _safe(fn):
       annotations=_acts(),
       description="Fetch pages whose URLs you already have and return their content. No project is created.\n"
                   "Use crawl_site when the URLs must be found by following links, and map_site to list a site's "
-                  "URLs without fetching. get_page reads a page a project already stored, for free.\n"
+                  "URLs without fetching. list_pages with url reads a page a project already stored, for free.\n"
                   "Inputs: urls come from the request or from map_site. formats adds bodies, e.g. 'markdown,text'. "
                   "config overrides fetch settings, e.g. {\"render_js\": \"always\"}; get_project with no project_id "
                   "lists the keys. full=true reads one URL in full and runs config.actions first, e.g. [{\"type\": "
@@ -1120,7 +1124,7 @@ def _shape_search(out, hits, running, reserve):
                   "back for get_job; a scraping search whose pages are still landing returns its results with a "
                   "job for the pages.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
-def web_search(query: Annotated[str, Field(
+def search_web(query: Annotated[str, Field(
                    description="What to search the web for, 1 to 400 characters, as it would be typed into a "
                                "search engine.")],
                limit: Annotated[int, Field(
@@ -1141,7 +1145,7 @@ def web_search(query: Annotated[str, Field(
                                "exclude wins over an include.")] = None,
                scrape: Annotated[bool, Field(
                    description="true also fetches each result's page as markdown; each page costs credits. "
-                               "false (default) returns the results only.")] = False) -> WebSearchOut:
+                               "false (default) returns the results only.")] = False) -> SearchWebOut:
     def go():
         opts = {"limit": max(1, min(limit, 10)), "country": country, "lang": lang, "freshness": freshness,
                 "include_domains": include_domains or None, "exclude_domains": exclude_domains or None,
@@ -1172,17 +1176,37 @@ def web_search(query: Annotated[str, Field(
 
 @tool(title="List all projects",
       annotations=READS_STORED,
-      description="List every project in the workspace: the sites it watches over time, each with its id, name, "
-                  "host, schedule, page count, coverage, last run and status.\n"
-                  "Call it first to find the project_id the other project tools take, or to check a site is not "
-                  "already watched before create_project. get_project reads one project in full.\n"
+      description="List every project in the workspace, the sites it watches over time, each with its id, name, "
+                  "host, schedule, page count, coverage, last run and status; and the workspace's plan and the "
+                  "credits it has left.\n"
+                  "Call it first to find the project_id the other project tools take, to check a site is not "
+                  "already watched before create_project, or to see whether there are credits for a large crawl. "
+                  "get_project reads one project in full.\n"
                   "Results: every project in one answer, oldest first, with no paging. A key limited to some "
                   "projects sees only those.\n"
                   "Read-only and free: it reads stored data and never fetches.")
 def list_projects() -> ProjectsOut:
-    return _safe(lambda: {"projects": [
-        {k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "pages", "coverage", "lastRun", "status")}
-        for p in _client().projects.list()]})
+    def go():
+        s = _client()
+        out: dict = {"projects": [
+            {k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "pages", "coverage", "lastRun",
+                                   "status")}
+            for p in s.projects.list()]}
+        # The balance rides along so an assistant can check it before a
+        # large crawl rather than learn it from a 402. It is an extra: no
+        # failure reading it costs the caller the projects.
+        try:
+            b = s.billing()
+            month = b.get("month") or {}
+            out["workspace"] = {"plan": (b.get("plan") or {}).get("name"),
+                                "creditsLeft": month.get("remaining"),
+                                "creditsSpentThisMonth": (month.get("counters") or {}).get("credits"),
+                                "oneTimeAllowance": bool(month.get("once"))}
+        except Exception as exc:                          # noqa: BLE001
+            detail = exc.detail if isinstance(exc, MeshArcError) else type(exc).__name__
+            out["workspace"] = {"note": f"the balance could not be read: {detail}"}
+        return out
+    return _safe(go)
 
 
 # The settings an assistant is likely to set, with what each means. The
@@ -1243,6 +1267,11 @@ CONFIG_GUIDE = {
 }
 
 
+# A webhook delivery as get_project shows it: whether it arrived and why not,
+# without the payload, which repeats the run record.
+DELIVERY_FIELDS = ("id", "event", "status", "attempts", "lastStatus", "lastError", "createdAt", "deliveredAt")
+
+
 @tool(title="Get a project, or the settings",
       annotations=READS_STORED,
       description="Read one project in full, or with no project_id the settings any project can take.\n"
@@ -1251,6 +1280,9 @@ CONFIG_GUIDE = {
                   "refused. list_projects is the lighter way to find a project.\n"
                   "Inputs: project_id is the hex id from list_projects, not a name or URL. An unknown id answers "
                   "404.\n"
+                  "Webhooks: a project's answer includes its webhook URL, the events sent there, and the last 10 "
+                  "deliveries with their status and error, to see whether the endpoint is receiving them. "
+                  "update_project sets them and sends a test.\n"
                   "Secrets: the webhook signing secret is never returned, and chat_url comes back masked.\n"
                   "Read-only and free: it reads stored data and never fetches.")
 def get_project(project_id: Annotated[str | None, Field(
@@ -1258,7 +1290,22 @@ def get_project(project_id: Annotated[str | None, Field(
                                 "reference.")] = None) -> ProjectOut:
     def go():
         if project_id:
-            return _client().projects.get(project_id)
+            with _client() as s:
+                project = s.projects.get(project_id)
+                cfg = project.get("config") or {}
+                hooks: dict = {"url": cfg.get("webhook_url") or "", "events": cfg.get("webhook_events") or []}
+                # The deliveries route, not GET .../webhooks: for an admin key
+                # that one creates a signing secret when there is none, and a
+                # read-only tool must not write. A failure here does not cost
+                # the caller the project.
+                try:
+                    hooks["deliveries"] = [{k: d.get(k) for k in DELIVERY_FIELDS}
+                                           for d in s.webhook_deliveries(project_id, limit=10)]
+                except MeshArcError as exc:
+                    hooks["deliveries"] = None
+                    hooks["note"] = f"the deliveries could not be read: {exc.detail}"
+                project["webhooks"] = hooks
+                return project
         with _client() as s:
             defaults = (s.meta().get("configDefaults") or {})
             return {"settings": [{"key": k, "meaning": v, "default": defaults.get(k)} for k, v in CONFIG_GUIDE.items()],
@@ -1315,14 +1362,19 @@ def create_project(seed: Annotated[str | None, Field(
 
 
 @tool(title="Update a project's settings",
-      annotations=_acts(destructive=True, idempotent=True, open_world=False),
-      description="Change a project's name, schedule or settings.\n"
+      annotations=_acts(destructive=True),
+      description="Change a project's name, schedule or settings, its webhook among them, and send the webhook a "
+                  "test.\n"
                   "Call get_project first to see the current values. To crawl with the new settings now, follow "
                   "with start_run. A project's site cannot change: to watch another site use create_project.\n"
                   "Inputs: project_id from list_projects. Only what you pass changes, and in config only the keys "
                   "given, so config={\"max_pages\": 200} leaves every other setting alone. schedule=\'manual\' stops "
-                  "scheduled runs. Valid keys come from get_project with no project_id.\n"
-                  "Effect: nothing is fetched and no credits are spent. A replaced value is gone, not versioned. "
+                  "scheduled runs. Valid keys come from get_project with no project_id. A webhook is "
+                  "config={\"webhook_url\": \"https://example.com/hook\", \"webhook_events\": [\"run.finished\", "
+                  "\"page.changed\"]}; webhook_url=\"\" turns it off. test_webhook=true then queues a test "
+                  "run.finished message, and get_project shows whether it was delivered.\n"
+                  "Effect: it answers with the updated project. Nothing is fetched and no credits are spent. A "
+                  "replaced value is gone, not versioned. "
                   "Changing how markdown is produced (e.g. only_main_content, include_tags, exclude_tags) makes the "
                   "next run a new baseline, recorded rather than compared.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
@@ -1331,7 +1383,10 @@ def update_project(project_id: ProjectId,
                    schedule: Annotated[Schedule | None, Field(
                        description="A new schedule; omit to leave it.")] = None,
                    config: Annotated[dict | None, Field(
-                       description="Settings to change as {key: value}; omit to leave them all.")] = None
+                       description="Settings to change as {key: value}; omit to leave them all.")] = None,
+                   test_webhook: Annotated[bool, Field(
+                       description="true sends a test run.finished message to the project's webhook URL, after "
+                                   "any changes; the URL must be saved. Default false.")] = False
                    ) -> ProjectOut:
     def go():
         fields: dict = {}
@@ -1341,10 +1396,23 @@ def update_project(project_id: ProjectId,
             fields["schedule"] = schedule
         if config:
             fields["config"] = config
-        if not fields:
-            return {"error": "nothing to change: give a name, a schedule or config"}
+        if not fields and not test_webhook:
+            return {"error": "nothing to change: give a name, a schedule, config or test_webhook"}
         with _client() as s:
-            return s.projects.update(project_id, **fields)
+            out = s.projects.update(project_id, **fields) if fields else s.projects.get(project_id)
+            if test_webhook:
+                # After the update, so a URL saved in this same call is the one
+                # tested. A refused test does not undo the change just made.
+                try:
+                    out["webhookTest"] = s.test_webhook(project_id)
+                except MeshArcError as exc:
+                    if exc.status == 403:
+                        # The connection cannot write. Nothing was changed
+                        # either (an update needs the same access), so the
+                        # standard read_only answer is the honest one.
+                        raise
+                    out["webhookTest"] = {"error": exc.detail, "status": exc.status}
+            return out
     return _safe(go)
 
 
@@ -1444,7 +1512,7 @@ RUN_FIELDS = ("id", "status", "trigger", "scope", "pagesN", "changedN", "counts"
       annotations=READS_STORED,
       description="List a project's runs, newest first, with each run's id, status, trigger, pages read and pages "
                   "changed.\n"
-                  "Use it to find a run_id for list_pages, get_page or get_changes, to check whether a run is still "
+                  "Use it to find a run_id for list_pages or get_changes, to check whether a run is still "
                   "going before start_run, or to find the run to stop with cancel_job. get_project shows only the "
                   "last run.\n"
                   "Inputs: project_id from list_projects. limit=5 finds the latest few; runs past the limit cannot "
@@ -1462,28 +1530,42 @@ def list_runs(project_id: ProjectId,
     return _safe(go)
 
 
-@tool(title="List or search a run's pages",
+@tool(title="List, search or read a run's pages",
       annotations=READS_STORED,
-      description="List the pages a project run stored, or with q, find the pages whose text or markup matches.\n"
-                  "Use it to see what a run covered, to pick a URL for get_page, or to find pages by what they say. "
-                  "get_changes lists only what changed. To search a crawl_site crawl or the live site, use get_job "
-                  "or scrape_urls.\n"
-                  "Inputs: project_id from list_projects; run_id from list_runs, empty for the latest finished run. "
-                  "q=\'free trial\' needs both words, q=\'\"free trial\"\' the phrase. mode=\'selector\' takes CSS such as "
-                  "'form#signup' and needs a run that kept html (the rawHtml format); otherwise the answer says so.\n"
-                  "Limits: up to 500 rows, shallowest first; use q to reach pages past the first 500. A project "
-                  "with no finished run answers with no pages.\n"
+      description="List the pages a project run stored; with q, find the pages whose text or markup matches; with "
+                  "url, read one page in full, with its versions across runs.\n"
+                  "Use it for what a project's runs stored: what a run covered, which pages say something, one "
+                  "page's text. search_web searches the live web instead, get_job reads a crawl_site crawl, "
+                  "scrape_urls fetches a live copy, and get_changes lists only what changed.\n"
+                  "Inputs: project_id from list_projects. q=\'free trial\' needs both words, q=\'\"free trial\"\' the "
+                  "phrase; mode=\'selector\' takes CSS such as 'form#signup' and needs a run that kept html (the "
+                  "rawHtml format). url is an address, not a search term: scheme and trailing slash may differ, the "
+                  "rest must match, query string included. Give q or url, not both. run_id from list_runs picks "
+                  "the run.\n"
+                  "Limits: a listing has up to 500 rows, shallowest first, so use q to reach pages past them. A "
+                  "page read in full has each body capped at 12,000 characters, and a URL the runs did not store "
+                  "answers 404.\n"
                   "Read-only and free: it reads stored data and never fetches.")
 def list_pages(project_id: ProjectId,
-               run_id: RunId = None,
+               run_id: Annotated[str | None, Field(
+                   description="A run's id, from list_runs; empty means the latest finished run, or with url the "
+                               "newest copy across the project's last 50 runs.")] = None,
                q: Annotated[str | None, Field(
                    description="Text to find, 1 to 200 characters: words or a \"quoted phrase\", or with "
                                "mode='selector' a CSS selector or an XPath starting with / or (. Omit to list "
                                "every page.")] = None,
                mode: Annotated[Literal["content", "selector"], Field(
                    description="With q: 'content' (default) searches the markdown, 'selector' the stored html.")]
-               = "content") -> PagesOut:
+               = "content",
+               url: Annotated[str | None, Field(
+                   description="One page's full URL, as a listing shows it, to read that page in full; omit to "
+                               "list.")] = None) -> PagesOut:
     def go():
+        if q and url:
+            return {"error": "give q (find pages) or url (read one page), not both", "code": "validation"}
+        if url:
+            # What get_page did until 0.6.0: one page in full, bodies capped.
+            return _trim_page(_client().page(project_id, url, run_id))
         if q:
             return _client().search(project_id, q, mode=mode, run_id=run_id)
         r = _client().pages(project_id, run_id)
@@ -1492,40 +1574,25 @@ def list_pages(project_id: ProjectId,
     return _safe(go)
 
 
-@tool(title="Get one stored page",
-      annotations=READS_STORED,
-      description="Read one page a project run stored, in full: its bodies, head and extracted fields, and its "
-                  "versions across runs.\n"
-                  "Use it when you know the URL; list_pages finds it first. For a crawl_site crawl use get_job with "
-                  "url, and for a live copy scrape_urls.\n"
-                  "Inputs: project_id from list_projects. url is an address, not a search term: scheme and trailing "
-                  "slash may differ, the rest must match, query string included. run_id from list_runs pins that "
-                  "run's copy, to compare a page across runs.\n"
-                  "Limits: each body is capped at 12,000 characters. A URL the runs did not store answers 404.\n"
-                  "Read-only and free: it reads stored data and never fetches.")
-def get_page(project_id: ProjectId,
-             url: Annotated[str, Field(
-                 description="The page's full URL, as list_pages shows it.")],
-             run_id: Annotated[str | None, Field(
-                 description="A run's id, to read that run's copy; empty means the newest copy across the "
-                             "project's last 50 runs.")] = None) -> PageOut:
-    return _safe(lambda: _trim_page(_client().page(project_id, url, run_id)))
-
-
 @tool(title="Get what changed in a run",
       annotations=READS_STORED,
-      description="Report what changed in a project run against the run just before it: pages added, modified and "
-                  "removed, field changes, and coverage.\n"
-                  "Use it to answer 'what changed on the site'. list_pages shows every page whether or not it "
-                  "changed, and get_page one page's text and versions.\n"
-                  "Inputs: project_id from list_projects. run_id from list_runs picks an older run, still compared "
-                  "with the run before it; empty means the latest finished run. A run still going answers 409.\n"
+      description="Report what changed in a project run against the run just before it, or against any run you "
+                  "name: pages added, modified and removed, field changes, and coverage.\n"
+                  "Use it to answer 'what changed on the site', or 'since last month' with against. list_pages "
+                  "shows every page whether or not it changed, and list_pages with url one page's text and "
+                  "versions.\n"
+                  "Inputs: project_id from list_projects. run_id from list_runs picks the run; empty means the "
+                  "latest finished run. against, another run's id from list_runs, compares the two directly instead "
+                  "of with the run just before. A run still going answers 409.\n"
                   "Safeguards: removals are withheld when a run reached under 90% of the site, so a blocked crawl "
                   "never reports pages as gone. A project's first run is a baseline with nothing to compare.\n"
                   "Read-only and free: it reads stored data and never fetches.")
-def get_changes(project_id: ProjectId, run_id: RunId = None) -> ChangesOut:
+def get_changes(project_id: ProjectId, run_id: RunId = None,
+                against: Annotated[str | None, Field(
+                    description="Another run's id, from list_runs, to compare with directly; omit to compare with "
+                                "the run just before.")] = None) -> ChangesOut:
     def go():
-        r = _client().changes(project_id, run_id)
+        r = _client().changes(project_id, run_id, against=against)
         ch = r.get("change") or {}
         for k in ("feed", "fields", "withheld"):
             if isinstance(ch.get(k), list):
@@ -1545,19 +1612,19 @@ JobProject = Annotated[str | None, Field(description="A run's project id; requir
       description="Check on a crawl, run, batch or web search a tool handed back as a job, and return its result "
                   "once finished.\n"
                   "Call it when a tool answered with status 'running' and a job; repeating that tool is not needed. "
-                  "To stop a crawl, run or batch use cancel_job. For a project's stored pages use get_page.\n"
+                  "To stop a crawl, run or batch use cancel_job. For a project's stored pages use list_pages.\n"
                   "Inputs: kind, id and project_id come from the 'job' object; a crawl_site crawl_id is a crawl's "
                   "id. For a crawl, url reads one page in full, even mid-crawl, and cursor from the last answer "
                   "reads the next window.\n"
                   "Behaviour: it answers at once and never waits, so call it again every 10 to 30 seconds while the "
                   "status is 'running'. A finished crawl answers as crawl_site does (up to 50 pages excerpted per "
-                  "window), a batch as scrape_urls, a search as web_search, a run with its record. A scraping "
+                  "window), a batch as scrape_urls, a search as search_web, a run with its record. A scraping "
                   "search whose pages are still landing answers with its results and the job. A crawl expires a day "
                   "after it started unless kept, then answers 404.\n"
                   "Read-only and free: it reads stored data and never fetches.")
 def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search"], Field(
                 description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls with several URLs) or "
-                            "'search' (web_search).")],
+                            "'search' (search_web).")],
             id: JobId,
             project_id: JobProject = None,
             url: Annotated[str | None, Field(
@@ -1679,7 +1746,7 @@ def cancel_job(kind: JobKind, id: JobId, project_id: JobProject = None) -> Cance
     return _safe(go)
 
 
-# Stdio's server, built now that the sixteen are declared. Hosted mode
+# Stdio's server, built now that the fifteen are declared. Hosted mode
 # builds its own in `authorize`, because auth is set in the constructor.
 server = _build()
 
@@ -1806,7 +1873,7 @@ def _transport_security(public_url):
 
 
 def authorize(issuer, public, secret):
-    """The hosted server: the same sixteen tools, with OAuth attached.
+    """The hosted server: the same fifteen tools, with OAuth attached.
 
     A server of its own rather than the stdio one with auth bolted on after
     the fact. `token_verifier` and `auth` are constructor arguments, and
