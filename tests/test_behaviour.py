@@ -1,9 +1,10 @@
 import pathlib
 
 import httpx
+import pytest
 
 import mesharc
-from mesharc import Crawl, MeshArc, MeshArcError
+from mesharc import Crawl, MeshArc, MeshArcError, MeshArcTimeoutError
 
 
 class FakeHttp:
@@ -92,6 +93,81 @@ def test_the_page_walk_can_start_from_a_cursor():
     assert http.calls[-1][2]["cursor"] == "c7"
 
 
+def test_a_search_answered_at_once_returns_the_whole_envelope_and_sends_camelcase():
+    done = {"id": "s1", "status": "done", "data": [{"url": "https://x.test/", "title": "X"}]}
+    arc, http = client([done])
+    assert arc.web_search("mesh arc", limit=5, freshness="week", include_domains=["x.test"],
+                          exclude_domains=("y.test",), scrape=True, idempotency_key="k-s") == done
+    assert http.calls == [("POST", "/search", {}, {
+        "query": "mesh arc", "limit": 5, "freshness": "week", "includeDomains": ["x.test"],
+        "excludeDomains": ["y.test"], "scrape": {"formats": ["markdown"]}, "timeout": 60}, "k-s")]
+
+
+def test_a_queued_search_is_polled_until_done():
+    arc, http = client([{"id": "s2", "status": "queued"}, {"id": "s2", "status": "running"},
+                        {"id": "s2", "status": "done", "data": [{"url": "a"}]}])
+    assert arc.web_search("q", poll=0)["data"] == [{"url": "a"}]
+    assert [c[:3] for c in http.calls[1:]] == [("GET", "/search/s2", {}), ("GET", "/search/s2", {})]
+
+
+def test_a_blocked_search_is_returned_not_raised():
+    arc, http = client([{"id": "s3", "status": "running"}, {"id": "s3", "status": "blocked", "data": []}])
+    assert arc.web_search("q", poll=0)["status"] == "blocked"
+    assert len(http.calls) == 2
+
+
+def test_a_search_that_ends_in_error_raises_with_the_apis_text():
+    arc, _ = client([{"id": "s4", "status": "error", "error": "every engine failed"}])
+    with pytest.raises(MeshArcError) as exc:
+        arc.web_search("q", poll=0)
+    assert (exc.value.status, exc.value.code, exc.value.detail) == (502, "job_failed", "every engine failed")
+
+
+def test_a_search_still_running_at_the_deadline_raises_a_timeout_naming_it():
+    arc, _ = client([{"id": "s5", "status": "running"}])
+    with pytest.raises(MeshArcTimeoutError) as exc:
+        arc.web_search("q", poll=0, timeout=0)
+    assert exc.value.job_id == "s5"
+
+
+def test_a_search_without_waiting_asks_once_with_no_hold():
+    arc, http = client([{"id": "s6", "status": "queued"}])
+    assert arc.web_search("q", wait=False) == {"id": "s6", "status": "queued"}
+    assert len(http.calls) == 1
+    assert http.calls[0][3] == {"query": "q", "timeout": 0}
+
+
+def test_a_search_sends_an_explicit_hold_and_a_scrape_dict_as_given():
+    scrape = {"formats": ["markdown", "links"], "maxCredits": 20}
+    arc, http = client([{"id": "s7", "status": "queued"}, {"id": "s8", "status": "done"}])
+    arc.web_search("q", wait=False, timeout_s=30, scrape=scrape)
+    assert http.calls[0][3] == {"query": "q", "scrape": scrape, "timeout": 30}
+    arc.web_search("q", scrape=False)
+    assert "scrape" not in http.calls[1][3]
+    assert http.calls[1][3]["timeout"] == 60
+
+
+def test_a_search_started_earlier_is_asked_for_by_id():
+    arc, http = client([{"id": "s9", "status": "done"}])
+    assert arc.get_search("s9") == {"id": "s9", "status": "done"}
+    assert http.calls == [("GET", "/search/s9", {}, {}, None)]
+
+
+def test_the_search_list_follows_next_and_sends_q_and_limit_on_every_page():
+    arc, http = client([{"data": [{"id": "a"}, {"id": "b"}], "next": "/api/v1/search?limit=2&q=mesh&cursor=c2"},
+                        {"data": [{"id": "c"}], "next": None}])
+    assert [row["id"] for row in arc.searches(q="mesh", limit=2)] == ["a", "b", "c"]
+    assert [c[:3] for c in http.calls] == [("GET", "/search", {"limit": 2, "q": "mesh"}),
+                                           ("GET", "/search", {"limit": 2, "q": "mesh", "cursor": "c2"})]
+
+
+def test_the_project_search_still_asks_the_projects_pages():
+    arc, http = client([{"data": []}])
+    arc.search("p1", "pricing")
+    assert http.calls[0][:2] == ("POST", "/projects/p1/pages/search")
+    assert http.calls[0][3] == {"mode": "content", "q": "pricing", "run_id": None}
+
+
 def test_an_error_carries_its_code_and_request_id():
     err = MeshArcError(429, "too many", "rate_limited", "req_abc")
     assert (err.status, err.code, err.request_id) == (429, "rate_limited", "req_abc")
@@ -127,7 +203,7 @@ def test_pace_waits_out_the_window_only_when_nearly_out(monkeypatch):
 
 def test_the_mcp_server_offers_the_verbs_and_the_config_tools():
     source = (pathlib.Path(mesharc.__file__).parent / "mcp.py").read_text(encoding="utf-8")
-    for name in ("scrape_urls", "map_site", "crawl_site", "list_projects", "get_changes", "get_job",
-                 "cancel_job", "list_runs", "list_pages", "get_page", "start_run", "get_project",
+    for name in ("scrape_urls", "map_site", "crawl_site", "web_search", "list_projects", "get_changes",
+                 "get_job", "cancel_job", "list_runs", "list_pages", "get_page", "start_run", "get_project",
                  "create_project", "update_project", "delete_project"):
         assert f"def {name}(" in source, name

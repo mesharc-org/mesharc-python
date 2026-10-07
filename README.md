@@ -5,6 +5,7 @@ The Python client for the [MeshArc](https://mesharc.dev) API: a URL in, clean co
 - **Scrape** one page or a batch — markdown, text, HTML, links, structured fields, a screenshot.
 - **Crawl** a whole site with no project to set up first, and keep it as one if it turns out to be worth watching.
 - **Map** what a site declares in its sitemaps before fetching any of it.
+- **Search** the web for pages whose URLs you do not know, and read each result's page in the same call.
 - **Watch** a site over time: projects, scheduled runs, and a change record — pages added, removed, modified, field by field.
 
 Python 3.10 or newer. One dependency (`httpx`). Fully typed.
@@ -135,6 +136,37 @@ print(details["totals"], details["creditsUsed"])   # {'files': 29, 'urls': 50843
 
 A map costs one credit per sitemap file read — most sites are one file.
 
+## Searching the web
+
+```python
+out = arc.web_search(
+    "python packaging guide",
+    limit=5,                            # 1 to 10 results
+    freshness="month",                  # hour | day | week | month | year
+    include_domains=["python.org"],     # exclude_domains= too; an exclude wins
+    scrape=True,                        # each result's page as markdown as well
+)
+
+if out["status"] == "blocked":          # every engine refused; nothing was charged
+    print(out["attempts"])
+else:
+    for hit in out["data"]:
+        print(hit["position"], hit["title"], hit["url"], hit["snippet"])
+        if hit.get("page"):
+            print(hit["page"].get("markdown", "")[:200])
+print(out["engine"], out["cached"], out["creditsUsed"])
+
+again = arc.get_search(out["id"])       # a search started earlier, by id
+for s in arc.searches(q="python"):      # the workspace's searches, newest first
+    print(s["id"], s["query"], s["status"], s["resultCount"], s["creditsUsed"])
+```
+
+`web_search` waits for the results and returns the whole envelope, the hits under `data`. A search is `queued`, `running`, `done`, `blocked` or `error`: `blocked` — every engine refused — is returned, not raised; `error` raises `MeshArcError`. A search that scrapes stays `running` until its pages land. `scrape=` also takes a dict, sent as given (`{"formats": ["markdown", "links"], "maxCredits": 20}`); `country=` and `lang=` say where and in what language to search; `wait=False` returns at once, and `timeout_s` is how long the API holds the request (60 s by default, 120 at most) before the client polls.
+
+A search needs a key that can write, and it spends credits. The results page costs the engine that read it; a results page every engine refused is free. An equal search — same query, `country`, `lang`, `freshness` and domains — within an hour of a finished one comes from the cache (`cached` is true) with no charge for the results page. Scraped pages are charged, cached or not.
+
+`arc.search(project_id, q)` is something else: it searches the pages a project has stored, not the web (see below).
+
 ## Watching a site: projects and runs
 
 ```python
@@ -207,22 +239,22 @@ except MeshArcError as exc:
 
 `request_id` is the id the API put on the response and in its own logs, so a support conversation starts from one string.
 
-Two more cases: a network failure or a request that hits `timeout` raises `MeshArcError` with `status == 0` and `code` `network` or `timeout`; a job the client stopped waiting for raises `MeshArcTimeoutError` — both a `MeshArcError` and a `TimeoutError` — which carries `job_id` so you can poll it later (`arc.get_crawl(id)`, `arc.batch(id)`).
+Two more cases: a network failure or a request that hits `timeout` raises `MeshArcError` with `status == 0` and `code` `network` or `timeout`; a job the client stopped waiting for raises `MeshArcTimeoutError` — both a `MeshArcError` and a `TimeoutError` — which carries `job_id` so you can poll it later (`arc.get_crawl(id)`, `arc.batch(id)`, `arc.get_search(id)`).
 
 ## Idempotency and timeouts
 
-- `scrape`, `scrape_one` and `crawl` take `idempotency_key=`: send the same key again within 24 hours and you get the first answer back rather than a second job.
+- `scrape`, `scrape_one`, `crawl` and `web_search` take `idempotency_key=`: send the same key again within 24 hours and you get the first answer back rather than a second job. The MCP server's `web_search` tool sends none, on purpose: an equal search within the hour of a finished one comes from the cache anyway.
 - Waiting calls take `wait=`, `poll=` (seconds between polls) and `timeout=` (seconds before `TimeoutError`). `wait=False` returns the envelope at once; the default polls every 3 s for up to an hour.
 - `timeout_s` on a single scrape is how long the API itself holds the request open (60 s by default, 120 at most); a slower page comes back as an id and is polled.
 - `MeshArc(..., timeout=150.0)` is the HTTP timeout per request. A request is retried on 429, 502, 503, 504 and network failures when it is safe to repeat — a GET, a DELETE, or a POST with an idempotency key — up to `max_retries` times (2), honouring `Retry-After`.
 
 ## Credits
 
-Every response says what it cost: `credits` on a page, `creditsUsed` on a job envelope, `X-MeshArc-Credits` on the HTTP response. A page costs the engine that read it — a plain fetch 1, a render 4 — and a refused page or a 404 costs nothing. The schedule and the plans are at [mesharc.dev/docs/billing](https://mesharc.dev/docs/billing).
+Every response says what it cost: `credits` on a page, `creditsUsed` on a job envelope, `X-MeshArc-Credits` on the HTTP response. A page costs the engine that read it — a plain fetch 1, a render 4 — and a refused page or a 404 costs nothing. A web search's results page costs the engine that read it, and nothing when every engine refused; an equal search (same query, country, lang, freshness and domains) within an hour of a finished one comes from the cache with no charge for the results page, while the pages it scrapes are charged either way. The schedule and the plans are at [mesharc.dev/docs/billing](https://mesharc.dev/docs/billing).
 
 ## The MCP server
 
-The package also ships MeshArc as an MCP server, so Claude Desktop, Claude Code, Cursor and any MCP client can scrape, crawl, map and read change records as tools. Python 3.10+.
+The package also ships MeshArc as an MCP server, so Claude Desktop, Claude Code, Cursor and any MCP client can scrape, crawl, map, search the web and read change records as tools. Python 3.10+.
 
 There is a hosted one, so most people need install nothing:
 
@@ -243,13 +275,13 @@ MESHARC_API_KEY=mesharc_... mesharc-mcp          # serves over stdio
 claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 ```
 
-Tools: `scrape_urls`, `map_site`, `crawl_site`, `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `start_run`, `list_runs`, `list_pages`, `get_page`, `get_changes`, `get_job`, `cancel_job`. Every tool is a call through this client, and each one's answer is described by an output schema.
+Tools: `scrape_urls`, `map_site`, `crawl_site`, `web_search`, `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `start_run`, `list_runs`, `list_pages`, `get_page`, `get_changes`, `get_job`, `cancel_job`. Every tool is a call through this client, and each one's answer is described by an output schema. A tool that fails answers `{error, status}`, with the API's `code` and `request_id` as well when it gave them.
 
-A result with many pages in it is a map, not the territory: a crawl answers with an index of the pages read (up to 500, fewer if the budget needs the room), an excerpt of as many as a 60,000-character budget pays for (fifty at most), and a count of each page's links rather than the links. Ask for the one page you want on its own with `get_job(kind="crawl", id=…, url=…)`, or carry on through the crawl with `cursor=`. A multi-URL scrape past its budget counts the rest by status and names any that did not come back ok. One page asked for on its own -- `get_page`, or `scrape_urls` with a single url (with `full=true` for every format) -- comes back whole, capped at 12,000 characters.
+A result with many pages in it is a map, not the territory: a crawl answers with an index of the pages read (up to 500, fewer if the budget needs the room), an excerpt of as many as a 60,000-character budget pays for (fifty at most), and a count of each page's links rather than the links. Ask for the one page you want on its own with `get_job(kind="crawl", id=…, url=…)`, or carry on through the crawl with `cursor=`. A multi-URL scrape past its budget counts the rest by status and names any that did not come back ok. One page asked for on its own -- `get_page`, or `scrape_urls` with a single url (with `full=true` for every format) -- comes back whole, capped at 12,000 characters. A `web_search` answer keeps within the same 60,000 characters, a scraped result's page as an excerpt; `scrape_urls` with `full=true` reads one in full.
 
-Hosted, a connection can be approved read-only, and read-only cuts in a place worth knowing: it reads the whole workspace, but it cannot reach the site. Anything that fetches is a write, because it leaves the workspace and usually spends its credits -- `map_site` reads only a site's sitemaps, at a credit per sitemap file, and it is gated with the rest. `list_projects`, `get_project`, `list_runs`, `list_pages`, `get_page`, `get_changes` and `get_job` work; the eight that fetch or write -- `scrape_urls`, `map_site`, `crawl_site`, `create_project`, `update_project`, `delete_project`, `start_run`, `cancel_job` -- answer `{"code": "read_only"}` with what to do about it, until the app is reconnected with write access. `delete_project` needs more than write: an admin API key, which a connected app never holds, so it only works run locally with such a key.
+Hosted, a connection can be approved read-only, and read-only cuts in a place worth knowing: it reads the whole workspace, but it cannot reach the site. Anything that fetches is a write, because it leaves the workspace and usually spends its credits -- `map_site` reads only a site's sitemaps, at a credit per sitemap file, and it is gated with the rest. `list_projects`, `get_project`, `list_runs`, `list_pages`, `get_page`, `get_changes` and `get_job` work; the nine that fetch or write -- `scrape_urls`, `map_site`, `crawl_site`, `web_search`, `create_project`, `update_project`, `delete_project`, `start_run`, `cancel_job` -- answer `{"code": "read_only"}` with what to do about it, until the app is reconnected with 'Also allow changes' ticked (write access). `delete_project` needs more than write: an admin API key, which a connected app never holds, so it only works run locally with such a key.
 
-Hosted, a tool that would hold a connection open for minutes — a crawl, a run you asked to wait for, a multi-URL scrape — hands back a job after `MESHARC_MCP_WAIT` seconds (25 by default, because many MCP hosts time a tool call out sooner). The work carries on server-side; `get_job` picks it up and `cancel_job` stops it. Run locally, those tools block as they always have.
+Hosted, a tool that would hold a connection open for minutes — a crawl, a run you asked to wait for, a multi-URL scrape, a web search — hands back a job after `MESHARC_MCP_WAIT` seconds (25 by default, because many MCP hosts time a tool call out sooner). The work carries on server-side; `get_job` picks it up and `cancel_job` stops a crawl, run or batch. A search that scrapes, with its results in and its pages still landing, answers with the results and a job for the pages. Run locally, those tools block as they always have.
 
 ### Hosting it yourself
 

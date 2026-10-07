@@ -110,6 +110,19 @@ def test_a_crawl_handle_pages_through_its_rows_and_follows_the_cursor():
     assert "cursor=abc" in str(arc.calls[2].url)
 
 
+def test_a_web_search_posts_its_body_with_the_key_and_polls_by_id():
+    arc = scripted({"id": "s1", "status": "running", "data": []},
+                   {"id": "s1", "status": "done", "data": [{"url": "https://a.test/"}]})
+    out = arc.web_search("mesh arc", limit=3, include_domains=["a.test"], scrape=True, poll=0, idempotency_key="srch-1")
+    assert out["data"] == [{"url": "https://a.test/"}]
+    post, poll = arc.calls
+    assert (post.method, post.url.path) == ("POST", "/api/v1/search")
+    assert post.headers["Idempotency-Key"] == "srch-1"
+    assert json.loads(post.content) == {"query": "mesh arc", "limit": 3, "includeDomains": ["a.test"],
+                                        "scrape": {"formats": ["markdown"]}, "timeout": 60}
+    assert (poll.method, str(poll.url)) == ("GET", "https://api.mesharc.dev/api/v1/search/s1")
+
+
 def test_export_streams_to_a_file(tmp_path):
     arc = scripted({"rows": 1})
     out = arc.export("p1", str(tmp_path / "pages.jsonl"), dataset="pages")

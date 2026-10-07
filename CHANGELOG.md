@@ -6,6 +6,21 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **The client searches the web, for pages whose URLs you do not know.** `web_search(query, limit=, country=, lang=, freshness=, include_domains=, exclude_domains=, scrape=, ...)` returns the whole envelope, the hits under `data`; `scrape=True` also fetches each hit as markdown. `get_search(id)` reopens a search started earlier, and `searches(q=None, limit=25)` walks the workspace's searches, following `next`. A search is `queued`, `running`, `done`, `blocked` or `error`: `blocked` (every engine refused) is returned, `error` raises `MeshArcError`. It needs a key that can write, and spends credits: a results page every engine refused is free, an equal search (same query, `country`, `lang`, `freshness` and domains) within an hour of a finished one comes from the cache with no results-page charge, and scraped pages are always charged. `search()` is unchanged and is still the project search. **This needs an API that has the `/search` route**, which is live on mesharc.dev.
+- **`web_search`, a sixteenth MCP tool, so an assistant can find pages before it reads them.** It needs write access; a read-only connection is answered `{"code": "read_only"}`. Its answer keeps within 60,000 characters, a scraped result's page as an excerpt, with `scrape_urls(full=true)` to read one in full, and an output schema describes it. Hosted, a search still going when `MESHARC_MCP_WAIT` runs out comes back as a job, and a scraping search whose pages are still landing returns its results with a job for the pages. It sends no idempotency key, by design: the API's one-hour cache already answers an equal search.
+- `get_job` takes `kind="search"`, for a search `web_search` handed back. `cancel_job` does not: the API has no way to stop a search.
+
+### Changed
+
+- **MCP error answers carry the API's `code` and `request_id`**, alongside `error` and `status`, so an assistant can tell one refusal from another and a support conversation can start from the request id. Both were dropped before; each is included when the API gave it.
+- The read-only answer names the box to tick on reconnecting, 'Also allow changes', and says "search inside a project" where it lists what a read-only connection can still do -- searching the web is not among them.
+
+### Fixed
+
+- **The settings guide (`get_project` with no `project_id`) described two settings in shapes the API refuses**, so an assistant following it wrote configs that failed. `json_schema` is a list of `{name, type, required}` fields, not a JSON schema. `llm_extract` is an object with a `connection_id` (or `null` for off); `true` was refused by the API. `formats` now lists `raw`.
+
 ## 0.4.0 - 2026-10-07
 
 The MCP server goes from nineteen tools to fifteen. **This breaks anything that calls the five removed tool names**; each one's call is still there, as an argument of the sibling it overlapped. The Python client's API is unchanged.

@@ -84,7 +84,9 @@ INSTRUCTIONS = (
     "crawl_site to crawl a whole site once without setting a project up first "
     "(create_project with its crawl_id turns it into a watched project afterwards). "
     "The project tools are for a site watched over time: its runs, its pages, search inside a run, "
-    "and its change record. A long tool may hand back a job: get_job follows it and cancel_job stops it. "
+    "and its change record. web_search searches the web for pages whose URLs you do not know; "
+    "list_pages with q searches only inside a project's run. "
+    "A long tool may hand back a job: get_job follows it and cancel_job stops it. "
     "Blocked pages are reported as blocked, never as missing."
 )
 
@@ -94,7 +96,7 @@ INSTRUCTIONS = (
 # on a second server later, built with auth in its constructor. The registry is
 # what carries the descriptions across: a description is the only thing an
 # assistant has to pick a tool by, and re-registering without them would leave
-# fifteen nameless verbs.
+# sixteen nameless verbs.
 _TOOLS: "list[tuple]" = []
 
 # What each tool does to the world, in the hints MCP clients read. A tool that
@@ -360,7 +362,7 @@ class ChangesOut(TypedDict, total=False):
 @with_config(ConfigDict(extra="allow"))
 class JobOut(TypedDict, total=False):
     """A job's state, or its result once finished: a crawl gives crawl_site's answer, a batch scrape_urls',
-    a run the run record, and `url` one page in full."""
+    a search web_search's, a run the run record, and `url` one page in full."""
     status: Annotated[Any, Field(description=(
         "'running' while it goes on; otherwise the finished job's status. On an error, the HTTP status code."))]
     job: Annotated[Any, Field(description="While running: {kind, id, project_id} to call again with.")]
@@ -370,7 +372,9 @@ class JobOut(TypedDict, total=False):
     index: Annotated[Any, Field(description="A finished crawl or batch: every page as {url, title, words, status}.")]
     cursor: Annotated[Any, Field(description="A crawl with more pages: pass it back for the next window.")]
     markdown: Annotated[Any, Field(description="With url: that page's markdown, capped at 12,000 characters.")]
-    id: Annotated[Any, Field(description="A run: its id.")]
+    id: Annotated[Any, Field(description="A run or a search: its id.")]
+    results: Annotated[Any, Field(description=(
+        "A search: the ranked results, as web_search returns them, with page excerpts when it scraped."))]
     note: Annotated[Any, Field(description="What to do next.")]
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
@@ -389,6 +393,32 @@ class CancelOut(TypedDict, total=False):
     note: Annotated[Any, Field(description="What a stop keeps and drops.")]
     error: Annotated[Any, Field(description=_ERR)]
     status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
+    code: Annotated[Any, Field(description=_CODE)]
+    detail: Annotated[Any, Field(description=_DETAIL)]
+
+
+@with_config(ConfigDict(extra="allow"))
+class WebSearchOut(TypedDict, total=False):
+    """A web search: the ranked results, with an excerpt of each page when scraped, or a job when it is still
+    going."""
+    id: Annotated[Any, Field(description="The search's id: for get_job with kind 'search'.")]
+    status: Annotated[Any, Field(description=(
+        "'done'; 'blocked' when every engine refused the results page (nothing charged); 'running' with a `job` "
+        "while it goes on. On an error, the HTTP status code."))]
+    query: Annotated[Any, Field(description="The query as searched.")]
+    engine: Annotated[Any, Field(description="The engine whose results page answered, e.g. 'google' or 'bing'.")]
+    cached: Annotated[Any, Field(description=(
+        "true when an equal search within the hour answered it, with no charge for the results page."))]
+    creditsUsed: Annotated[Any, Field(description="Credits this search spent, scraped pages included.")]
+    results: Annotated[Any, Field(description=(
+        "Up to 10, as ranked, each {position, title, url, snippet, source, engine}; when scraped also `page`, "
+        "{url, title, words, status, links (a count), markdown excerpt}, the excerpts sharing 60,000 characters."))]
+    attempts: Annotated[Any, Field(description="Blocked only: each engine tried, and why it was refused.")]
+    job: Annotated[Any, Field(description=(
+        "While it is still going: {kind: 'search', id} for get_job. A scraping search can carry its results and "
+        "a job for the pages still landing."))]
+    note: Annotated[Any, Field(description="The cache rule, and what to do next when it is still going.")]
+    error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
 
@@ -804,7 +834,7 @@ def _scopes():
     return list(getattr(at, "scopes", None) or []) if at else []
 
 
-# Eight of the fifteen tools need write, including every one that fetches a
+# Nine of the sixteen tools need write, including every one that fetches a
 # page: fetching spends the workspace's credits, so it is not a read however
 # it reads to an assistant asking for one URL. The API answers "this needs the
 # member role", which is true and tells an assistant nothing it can act on --
@@ -812,10 +842,10 @@ def _scopes():
 # approved the connection chose it.
 READ_ONLY = (
     "this connection was approved read-only. It can read what the workspace has "
-    "already stored -- projects, pages, change records, search, get_job -- but it "
-    "cannot fetch a new page or change anything: those reach the site or alter the "
-    "workspace, and most of them spend credits. "
-    "Ask the person to reconnect the app and tick write access."
+    "already stored -- projects, pages, change records, search inside a project, "
+    "get_job -- but it cannot fetch a new page or change anything: those reach the "
+    "site or alter the workspace, and most of them spend credits. "
+    "Ask the person to reconnect the app and tick 'Also allow changes' (write access)."
 )
 
 
@@ -842,6 +872,10 @@ def _safe(fn):
         return _no_secret(fn())
     except MeshArcError as exc:
         out = {"error": exc.detail, "status": exc.status}
+        if exc.code:
+            out["code"] = exc.code
+        if exc.request_id:
+            out["request_id"] = exc.request_id
         # A 403 carrying the status's own default code is the role check. The
         # named ones -- suspended, email_unverified, mfa_required -- are other
         # refusals and have to keep saying what they say.
@@ -855,6 +889,8 @@ def _safe(fn):
         if (exc.status == 403 and (exc.code or "") in ("", "forbidden")
                 and scopes is not None and "write" not in scopes):
             out = {"error": READ_ONLY, "status": 403, "code": "read_only", "detail": exc.detail}
+            if exc.request_id:
+                out["request_id"] = exc.request_id
         return out
     except Exception as exc:                          # noqa: BLE001
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -1008,6 +1044,131 @@ def crawl_site(url: Annotated[str, Field(description="The absolute http(s) URL t
     return _safe(go)
 
 
+SEARCH_NOTE = ("an equal search (same query, country, lang, freshness and domains) within an hour of a "
+               "finished one is answered from cache with no charge for the results page; scraped pages are "
+               "charged. scrape_urls with full=true reads one result in full")
+
+
+def _search_result(out, running=False):
+    """A web search, shaped once for an assistant.
+
+    The hits as the API ranked them, and a scraped page as an excerpt rather
+    than the page: ten results at a full page each is the answer a crawl used
+    to give, and the cap is chosen the same way -- what the rest of the answer
+    leaves, measured, shared between the pages. Built, weighed, and rebuilt
+    with the overshoot reserved, as a batch is.
+    """
+    data = out.get("data")
+    hits = [h for h in data if isinstance(h, dict)] if isinstance(data, list) else []
+    reserve, shaped = 0, None
+    for _attempt in range(4):
+        shaped = _shape_search(out, hits, running, reserve)
+        over = _cost(shaped) - RESULT_BUDGET
+        if over <= 0:
+            break
+        reserve += over + 64
+    return shaped
+
+
+def _shape_search(out, hits, running, reserve):
+    """One pass at a search's answer, at the budget `reserve` leaves."""
+    how = "call scrape_urls with that url"
+    results = [{k: h.get(k) for k in ("position", "title", "url", "snippet", "source", "engine")}
+               for h in hits]
+    paged = [i for i, h in enumerate(hits) if isinstance(h.get("page"), dict)]
+    shaped = {"id": out.get("id", ""), "status": out.get("status"), "query": out.get("query", ""),
+              "engine": out.get("engine", ""), "cached": bool(out.get("cached")),
+              "creditsUsed": out.get("creditsUsed"), "results": results}
+    if out.get("error"):
+        shaped["error"] = out["error"]
+    if out.get("status") == "blocked":
+        shaped["attempts"] = out.get("attempts") or []
+    notes = []
+    if running:
+        shaped["job"] = {"kind": "search", "id": out.get("id", "")}
+        notes.append("the results are in and their pages are still being fetched: call get_job with "
+                     "this job for the pages")
+    notes.append(SEARCH_NOTE)
+    shaped["note"] = ". ".join(notes)
+    if paged:
+        # Every page at a cap of zero is the frame; what is left is the excerpts'.
+        for i in paged:
+            results[i]["page"] = _summary_page(hits[i]["page"], 0, how)
+        left = RESULT_BUDGET - reserve - _cost(shaped)
+        cap = max(EXCERPT_FLOOR, min(MARKDOWN_CAP, left // len(paged)))
+        for i in paged:
+            results[i]["page"] = _summary_page(hits[i]["page"], cap, how)
+    return shaped
+
+
+@tool(title="Search the web",
+      annotations=_acts(),
+      description="Search the web for a query and return the ranked results, each with its title, url and "
+                  "snippet. The results are read from Google's results page, or Bing's when Google refuses.\n"
+                  "Use it to find pages whose URLs you do not know. It searches the web, unlike list_pages with q, "
+                  "which searches inside a project's stored run. For URLs you already have use scrape_urls; "
+                  "scrape_urls with full=true reads one result in full.\n"
+                  "Inputs: query as typed into a search engine, e.g. 'python http client'. scrape=true also fetches "
+                  "each result's page as markdown in the same call. include_domains=['python.org'] keeps the search "
+                  "to those sites; exclude_domains drops sites, and an exclude wins.\n"
+                  "Cost: the results page is charged as a scrape is, 1 credit for a plain fetch and 4 with a "
+                  "browser; a results page the engines refused is free. An equal search (same query, country, lang, freshness and domains) within an "
+                  "hour of a finished one comes from cache with no charge for the results page. Scraped pages are "
+                  "charged, cached or not.\n"
+                  "Timing: it waits for the results. If a search outlasts the connection's time limit, a job comes "
+                  "back for get_job; a scraping search whose pages are still landing returns its results with a "
+                  "job for the pages.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'.")
+def web_search(query: Annotated[str, Field(
+                   description="What to search the web for, 1 to 400 characters, as it would be typed into a "
+                               "search engine.")],
+               limit: Annotated[int, Field(
+                   description="How many results to return, 1 to 10 (default 10).")] = 10,
+               country: Annotated[str | None, Field(
+                   description="A 2-letter country code to search from, e.g. 'us' or 'de'; omit for the "
+                               "default.")] = None,
+               lang: Annotated[str | None, Field(
+                   description="A language code for the results, e.g. 'en'; omit for the default.")] = None,
+               freshness: Annotated[Literal["hour", "day", "week", "month", "year"] | None, Field(
+                   description="Only results from the last hour, day, week, month or year; omit for any "
+                               "time.")] = None,
+               include_domains: Annotated[list[str] | None, Field(
+                   description="Up to 20 sites to search within, e.g. ['python.org']; omit for the whole "
+                               "web.")] = None,
+               exclude_domains: Annotated[list[str] | None, Field(
+                   description="Up to 20 sites to leave out of the results, e.g. ['pinterest.com']; an "
+                               "exclude wins over an include.")] = None,
+               scrape: Annotated[bool, Field(
+                   description="true also fetches each result's page as markdown; each page costs credits. "
+                               "false (default) returns the results only.")] = False) -> WebSearchOut:
+    def go():
+        opts = {"limit": max(1, min(limit, 10)), "country": country, "lang": lang, "freshness": freshness,
+                "include_domains": include_domains or None, "exclude_domains": exclude_domains or None,
+                "scrape": scrape or None}
+        # No idempotency key: an equal search within the hour is served from
+        # the API's cache anyway, and a repeat is a new search by design.
+        with _client() as s:
+            budget = _budget()
+            if budget is None:
+                try:
+                    return _search_result(s.web_search(query, **opts))
+                except MeshArcTimeoutError as exc:
+                    # Past the client's own wait: still going server-side, and
+                    # get_job picks it up, as crawl_site's long crawls are.
+                    return _still_running("search", getattr(exc, "job_id", "") or "")
+            # Hosted: the API holds the request for most of the budget and
+            # answers with whatever it has, never a poll loop down this socket.
+            out = s.web_search(query, wait=False, timeout_s=max(1.0, min(120.0, budget - 5)), **opts)
+            if out.get("status") == "error":
+                raise MeshArcError(502, out.get("error") or "the search failed", "job_failed")
+            if _running(out.get("status")):
+                if not out.get("data"):
+                    return _still_running("search", out.get("id", ""))
+                return _search_result(out, running=True)
+            return _search_result(out)
+    return _safe(go)
+
+
 @tool(title="List all projects",
       annotations=READS_STORED,
       description="List every project in the workspace: the sites it watches over time, each with its id, name, "
@@ -1043,7 +1204,8 @@ CONFIG_GUIDE = {
     "render_js": "'auto' (a browser only when the page needs one; default), 'always', 'never'",
     "max_tier": "the highest rung allowed: 'auto' (as high as the plan allows), 'http', 'browser', 'stealth'",
     "max_credits_per_page": "cap on what one page may cost; 0 = no cap",
-    "formats": "list of bodies to keep: 'markdown', 'text', 'cleanHtml', 'rawHtml', 'links', 'screenshot', 'json'",
+    "formats": "list of bodies to keep: 'markdown', 'text', 'cleanHtml', 'rawHtml', 'raw', 'links', 'screenshot', "
+               "'json'; markdown is always kept (default ['markdown', 'links'])",
     "only_main_content": "true drops navigation, headers, footers and sidebars from the markdown",
     "include_tags": "CSS selectors to keep, e.g. ['article', '.post']",
     "exclude_tags": "CSS selectors to drop, e.g. ['.comments', '#newsletter']",
@@ -1053,8 +1215,18 @@ CONFIG_GUIDE = {
     "respect_robots": "obey robots.txt (default true)",
     "allow_subdomains": "follow links to subdomains of the seed's domain",
     "use_proxy": "route through the residential exits (costs more; for walled sites)",
-    "json_schema": "a JSON schema of fields to extract from every page",
-    "llm_extract": "true lets a model fill fields the markup could not",
+    "json_schema": "a LIST of fields to fill on every page, each {name, type, required}: type one of 'string' "
+                   "(default), 'number', 'date', 'boolean', 'url', 'array'; required defaults to false; a name "
+                   "starts with a letter, then letters, digits, _ . - (up to 64, no repeats); at most 40 fields "
+                   "(more are dropped). Filled from the page's markup, e.g. "
+                   "[{\"name\": \"price\", \"type\": \"number\", \"required\": true}]",
+    "llm_extract": "{connection_id, instructions?, only_missing?, max_pages?, max_chars?, max_output_tokens?} or "
+                   "null = off (true is refused): a model (an llm connection the workspace added under "
+                   "Connectors) fills the json_schema fields the markup could not; does nothing unless json_schema "
+                   "has fields. instructions cut at 2000 chars; only_missing default true (false asks for every "
+                   "field); max_pages 1-2000, default 500; max_chars 0 = as much as the model holds (default) "
+                   "else 2000-400000; "
+                   "max_output_tokens 0 = sized to the schema (default) else 200-16000",
     "webhook_url": "where to POST run and change events",
     "webhook_events": "which events to send, e.g. ['run.finished', 'page.changed']",
     "notify_min_words": "a change smaller than this many words is not notified",
@@ -1369,18 +1541,22 @@ JobProject = Annotated[str | None, Field(description="A run's project id; requir
 
 @tool(title="Follow a long-running job",
       annotations=READS_STORED,
-      description="Check on a crawl, run or batch a tool handed back as a job, and return its result once finished.\n"
+      description="Check on a crawl, run, batch or web search a tool handed back as a job, and return its result "
+                  "once finished.\n"
                   "Call it when a tool answered with status 'running' and a job; repeating that tool is not needed. "
-                  "To stop a job use cancel_job. For a project's stored pages use get_page.\n"
+                  "To stop a crawl, run or batch use cancel_job. For a project's stored pages use get_page.\n"
                   "Inputs: kind, id and project_id come from the 'job' object; a crawl_site crawl_id is a crawl's "
                   "id. For a crawl, url reads one page in full, even mid-crawl, and cursor from the last answer "
                   "reads the next window.\n"
                   "Behaviour: it answers at once and never waits, so call it again every 10 to 30 seconds while the "
                   "status is 'running'. A finished crawl answers as crawl_site does (up to 50 pages excerpted per "
-                  "window), a batch as scrape_urls, a run with its record. A crawl expires a day after it started "
-                  "unless kept, then answers 404.\n"
+                  "window), a batch as scrape_urls, a search as web_search, a run with its record. A scraping "
+                  "search whose pages are still landing answers with its results and the job. A crawl expires a day "
+                  "after it started unless kept, then answers 404.\n"
                   "Read-only and free: it reads stored data and never fetches.")
-def get_job(kind: JobKind,
+def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search"], Field(
+                description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls with several URLs) or "
+                            "'search' (web_search).")],
             id: JobId,
             project_id: JobProject = None,
             url: Annotated[str | None, Field(
@@ -1428,7 +1604,17 @@ def get_job(kind: JobKind,
             return run
         if kind == "batch":
             return _batch_result(s.batch(id))
-        return {"error": f"kind must be crawl, run or batch, not {kind!r}", "code": "validation"}
+        if kind == "search":
+            out = s.get_search(id)
+            status = out.get("status")
+            if status == "error":
+                raise MeshArcError(502, out.get("error") or "the search failed", "job_failed")
+            if _running(status):
+                # A scraping search has its hits before its pages land: those
+                # go back now, with the job, rather than a bare "running".
+                return _search_result(out, running=True) if out.get("data") else _still_running("search", id)
+            return _search_result(out)
+        return {"error": f"kind must be crawl, run, batch or search, not {kind!r}", "code": "validation"}
     return _safe(go)
 
 
@@ -1492,7 +1678,7 @@ def cancel_job(kind: JobKind, id: JobId, project_id: JobProject = None) -> Cance
     return _safe(go)
 
 
-# Stdio's server, built now that the fifteen are declared. Hosted mode
+# Stdio's server, built now that the sixteen are declared. Hosted mode
 # builds its own in `authorize`, because auth is set in the constructor.
 server = _build()
 
@@ -1619,7 +1805,7 @@ def _transport_security(public_url):
 
 
 def authorize(issuer, public, secret):
-    """The hosted server: the same fifteen tools, with OAuth attached.
+    """The hosted server: the same sixteen tools, with OAuth attached.
 
     A server of its own rather than the stdio one with auth bolted on after
     the fact. `token_verifier` and `auth` are constructor arguments, and
