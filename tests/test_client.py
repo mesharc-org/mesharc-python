@@ -120,3 +120,9 @@ def test_export_streams_to_a_file(tmp_path):
 def test_a_204_returns_none():
     arc = scripted((204, None))
     assert arc.revoke_key("k1") is None
+
+
+def test_cancel_batch_deletes_the_scrape():
+    arc = scripted((204, None))
+    assert arc.cancel_batch("b1") is None
+    assert (arc.calls[0].method, arc.calls[0].url.path) == ("DELETE", "/api/v1/scrape/b1")

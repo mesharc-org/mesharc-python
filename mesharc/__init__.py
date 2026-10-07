@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl"]
 
 DEFAULT_BASE = "https://api.mesharc.dev"
@@ -431,6 +431,12 @@ class MeshArc:
                 raise MeshArcTimeoutError(f"batch {batch_id} is still {r['status']} after {timeout}s", batch_id)
             time.sleep(poll)
             self._h.pace()
+
+    def cancel_batch(self, batch_id: str) -> None:
+        """Stop a scrape: every run of a batch, or a one-URL scrape still going.
+        Queued pages are dropped; a page being read finishes first, and pages
+        already read stay readable."""
+        self._h("DELETE", f"/scrape/{batch_id}")
 
     def crawl(self, url: str, wait: bool = False, poll: float = 3.0, timeout: float = 3600,
               idempotency_key: Optional[str] = None, **opts: Any) -> Crawl:
