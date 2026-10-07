@@ -6,6 +6,41 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.4.0 - 2026-10-07
+
+The MCP server goes from nineteen tools to fifteen. **This breaks anything that calls the five removed tool names**; each one's call is still there, as an argument of the sibling it overlapped. The Python client's API is unchanged.
+
+### Changed
+
+- **Five tools are folded into their siblings.** Each still makes the same API call as before:
+
+  | Was | Now |
+  |---|---|
+  | `extract_url(url, config)` | `scrape_urls([url], config, full=true)` |
+  | `keep_crawl_as_project(crawl_id, name, schedule)` | `create_project(crawl_id=..., name, schedule)` |
+  | `describe_project_config()` | `get_project()` with no `project_id` |
+  | `recrawl_pages(project_id, urls)` | `start_run(project_id, urls=[...])`, which can now also `wait` |
+  | `search_pages(project_id, q, mode, run_id)` | `list_pages(project_id, run_id, q=..., mode=...)` |
+
+  Why: assistants confused `scrape_urls` with `extract_url` for a single URL. Glama's grader also marked the set down for its size, scoring 19 tools as "slightly heavy" against its 3 to 15 band.
+- **A mistake an assistant can now make is refused with a reason, not guessed at.** Examples: both `seed` and `crawl_id`, `config` with a kept crawl, and `full=true` with more than one URL.
+- **`list_projects` answers `{projects: [...]}`** instead of a bare list, so its answer can carry an output schema.
+- Every description was rewritten. Each one now:
+  - says where each input comes from, with an example;
+  - says what the call costs;
+  - names its refusals.
+
+  Text that is now in the output schema was taken out.
+
+### Added
+
+- **Output schemas on every tool.** Each describes the fields of its answer, including the error fields.
+  - They describe the answer without filtering it: every field is optional, and a field the API adds later comes through as it is. No answer can fail validation, including an error.
+  - Clients that read `structuredContent` get the same JSON as the text block.
+- **`delete_project(project_id, confirm_name)`.** It deletes a project and everything its runs stored.
+  - `confirm_name` must repeat the project's name exactly, or nothing is deleted.
+  - The API allows it only for an admin key. OAuth connections hold read and write, never admin, so the hosted server refuses it with `code: admin_only` and says where to delete instead. It only works when the server runs locally with an admin API key.
+
 ## 0.3.4 - 2026-10-07
 
 ### Added
