@@ -22,9 +22,16 @@ class _Projects:
         self.delete_error = delete_error
         self.deleted = []
         self.created = []
+        self.updated = []
+        self.webhook_url_missing = False
 
     def get(self, project_id):
-        return {"id": project_id, "name": self.name, "webhookSecret": "whsec_x"}
+        return {"id": project_id, "name": self.name, "webhookSecret": "whsec_x",
+                "config": {"webhook_url": "https://example.com/hook", "webhook_events": ["run.finished"]}}
+
+    def update(self, project_id, **fields):
+        self.updated.append(fields)
+        return {"id": project_id, "name": fields.get("name", self.name), "config": fields.get("config", {})}
 
     def delete(self, project_id):
         if self.delete_error:
@@ -90,6 +97,22 @@ class _Client:
     def recrawl(self, project_id, urls):
         self.calls.append(("recrawl", project_id, list(urls)))
         return {"id": "r-scoped", "status": "running", "queued": True, "scope": len(urls)}
+
+    def page(self, project_id, url, run_id=None):
+        self.calls.append(("page", project_id, url, run_id))
+        return {"url": url, "markdown": "m" * 20_000, "runId": run_id or "r-new"}
+
+    def webhook_deliveries(self, project_id, limit=50):
+        self.calls.append(("deliveries", project_id, limit))
+        return [{"id": "d1", "event": "run.finished", "status": "failed", "attempts": 3, "lastStatus": 500,
+                 "lastError": "HTTP 500", "createdAt": "t", "deliveredAt": None, "payload": {"big": "x" * 5000},
+                 "log": [{"at": "t", "status": 500}]}]
+
+    def test_webhook(self, project_id):
+        self.calls.append(("test_webhook", project_id))
+        if self.projects.webhook_url_missing:
+            raise MeshArcError(400, "save a webhook URL first", "validation")
+        return {"queued": True, "id": "d2"}
 
     def search(self, project_id, q, mode="content", run_id=None):
         self.calls.append(("search", project_id, q, mode, run_id))
@@ -163,6 +186,116 @@ def test_no_project_id_reads_the_settings_reference(client):
 def test_a_project_id_reads_that_project_without_its_secret(client):
     out = mcp_mod.get_project("p1")
     assert out["id"] == "p1" and "webhookSecret" not in out
+
+
+def test_a_project_shows_its_webhook_and_how_its_deliveries_went(client):
+    hooks = mcp_mod.get_project("p1")["webhooks"]
+    assert hooks["url"] == "https://example.com/hook" and hooks["events"] == ["run.finished"]
+    d = hooks["deliveries"][0]
+    assert (d["status"], d["lastError"], d["attempts"]) == ("failed", "HTTP 500", 3)
+    assert "payload" not in d and "log" not in d, "the payload repeats the run record; whether it arrived is the point"
+    assert ("deliveries", "p1", 10) in client.calls
+
+
+def test_unreadable_deliveries_do_not_cost_the_project(monkeypatch):
+    c = _Client()
+
+    def broken(project_id, limit=50):
+        raise MeshArcError(503, "the deliveries are unavailable", "unavailable")
+    c.webhook_deliveries = broken
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.get_project("p1")
+    assert out["id"] == "p1" and out["webhooks"]["deliveries"] is None and "could not be read" in out["webhooks"]["note"]
+
+
+# -- list_projects: the balance rides along ------------------------------------------
+
+def test_the_project_list_says_what_the_workspace_has_left(monkeypatch):
+    class _WithBalance(_Client):
+        def billing(self):
+            return {"plan": {"name": "free"}, "month": {"remaining": 640, "once": True, "counters": {"credits": 360}}}
+    c = _WithBalance()
+    c.projects.list = lambda: [{"id": "p1", "name": "Docs", "status": "healthy"}]
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.list_projects()
+    assert out["projects"][0]["id"] == "p1"
+    assert out["workspace"] == {"plan": "free", "creditsLeft": 640, "creditsSpentThisMonth": 360,
+                                "oneTimeAllowance": True}
+
+
+def test_an_unreadable_balance_does_not_cost_the_projects(monkeypatch):
+    class _NoBalance(_Client):
+        def billing(self):
+            raise MeshArcError(503, "billing is unavailable", "unavailable")
+    c = _NoBalance()
+    c.projects.list = lambda: [{"id": "p1", "name": "Docs"}]
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.list_projects()
+    assert out["projects"][0]["id"] == "p1" and "billing is unavailable" in out["workspace"]["note"]
+
+
+# -- get_changes(against=...) ----------------------------------------------------------
+
+def test_against_compares_two_runs_directly(monkeypatch):
+    asked = []
+
+    class _Changes(_Client):
+        def changes(self, project_id, run_id=None, against=None):
+            asked.append((project_id, run_id, against))
+            return {"runs": [], "change": {"feed": [{"url": f"u{i}"} for i in range(300)]}}
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Changes())
+    out = mcp_mod.get_changes("p1", run_id="r9", against="r1")
+    assert asked == [("p1", "r9", "r1")] and len(out["change"]["feed"]) == 200
+
+
+# -- update_project(test_webhook=...) ---------------------------------------------
+
+def test_a_webhook_saved_and_tested_in_one_call_tests_the_new_url(client):
+    out = mcp_mod.update_project("p1", config={"webhook_url": "https://example.com/new"}, test_webhook=True)
+    assert client.projects.updated == [{"config": {"webhook_url": "https://example.com/new"}}]
+    assert client.calls[-1] == ("test_webhook", "p1"), "tested after the update, so the new url is the one tested"
+    assert out["webhookTest"] == {"queued": True, "id": "d2"}
+
+
+def test_a_test_alone_changes_nothing(client):
+    out = mcp_mod.update_project("p1", test_webhook=True)
+    assert client.projects.updated == [] and out["webhookTest"]["queued"] is True
+
+
+def test_a_refused_test_keeps_the_change_and_says_why(client):
+    client.projects.webhook_url_missing = True
+    out = mcp_mod.update_project("p1", name="Docs 2", test_webhook=True)
+    assert client.projects.updated == [{"name": "Docs 2"}] and out["name"] == "Docs 2"
+    assert out["webhookTest"] == {"error": "save a webhook URL first", "status": 400}
+
+
+def test_a_test_the_key_may_not_send_is_the_plain_refusal(monkeypatch):
+    # A 403 means the connection cannot write; it is passed to the standard
+    # handling (read_only, hosted) rather than tucked under webhookTest.
+    class _NoWrite(_Client):
+        def test_webhook(self, project_id):
+            raise MeshArcError(403, "this needs the member role", "forbidden")
+    c = _NoWrite()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.update_project("p1", test_webhook=True)
+    assert out.get("status") == 403 and "webhookTest" not in out and c.projects.updated == []
+
+
+def test_nothing_to_change_is_still_refused(client):
+    assert "nothing to change" in mcp_mod.update_project("p1")["error"]
+
+
+# -- list_pages(url=...): what get_page was -----------------------------------------
+
+def test_url_reads_one_page_in_full_with_bodies_capped(client):
+    out = mcp_mod.list_pages("p1", url="https://example.com/a", run_id="r1")
+    assert client.calls == [("page", "p1", "https://example.com/a", "r1")]
+    assert out["url"] == "https://example.com/a" and "cap for one page" in out["markdown"]
+
+
+def test_url_and_q_together_are_refused(client):
+    out = mcp_mod.list_pages("p1", q="x", url="https://example.com/a")
+    assert out["code"] == "validation" and client.calls == []
 
 
 # -- start_run(urls=...): what recrawl_pages was --------------------------------

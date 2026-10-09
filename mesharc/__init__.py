@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl"]
 
 DEFAULT_BASE = "https://api.mesharc.dev"
@@ -579,9 +579,16 @@ class MeshArc:
             params["run_id"] = run_id
         return self._h("GET", f"/projects/{project_id}/pages/content", params=params)
 
-    def changes(self, project_id: str, run_id: Optional[str] = None) -> Json:
-        """The change record of a run against the run before it."""
-        return self._h("GET", f"/projects/{project_id}/changes", params={"run_id": run_id} if run_id else None)
+    def changes(self, project_id: str, run_id: Optional[str] = None, against: Optional[str] = None) -> Json:
+        """The change record of a run against the run before it, or with
+        ``against`` against that run instead: two runs compared directly,
+        computed when asked and stored nowhere."""
+        params: Dict[str, Any] = {}
+        if run_id:
+            params["run_id"] = run_id
+        if against:
+            params["against"] = against
+        return self._h("GET", f"/projects/{project_id}/changes", params=params or None)
 
     def page_diff(self, project_id: str, url: str, run_id: Optional[str] = None) -> Json:
         """The word-level diff of one page against the run before."""
@@ -597,6 +604,18 @@ class MeshArc:
     def recrawl(self, project_id: str, urls: Iterable[str]) -> Json:
         """Fetch these pages again now, as a scoped run."""
         return self._h("POST", f"/projects/{project_id}/pages/recrawl", json={"urls": list(urls)})
+
+    def webhook_deliveries(self, project_id: str, limit: int = 50) -> List[Json]:
+        """A project's webhook deliveries, newest first: each one's event,
+        status (queued, retrying, delivered or failed), attempts and last error."""
+        out = self._h("GET", "/webhooks/deliveries", params={"projectId": project_id, "limit": limit})
+        return list(out.get("deliveries") or [])
+
+    def test_webhook(self, project_id: str) -> Json:
+        """Queue a test ``run.finished`` message to the project's webhook URL,
+        so the endpoint can be checked now. The API refuses it with 400 when no
+        webhook URL is saved."""
+        return self._h("POST", f"/projects/{project_id}/webhooks/test")
 
     def sources(self, project_id: str) -> Json:
         """The seed, sitemap, URL list, feeds and patterns, with what the last run found through each."""
@@ -648,6 +667,11 @@ class MeshArc:
 
     def usage(self) -> Json:
         return self._h("GET", "/me/usage")
+
+    def billing(self) -> Json:
+        """The plan, this month's spend and what is left to spend
+        (``month.remaining``, None for no limit), and the charges behind it."""
+        return self._h("GET", "/me/billing")
 
     def monitor(self) -> Json:
         return self._h("GET", "/me/monitor")
