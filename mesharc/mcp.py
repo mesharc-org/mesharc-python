@@ -86,6 +86,8 @@ INSTRUCTIONS = (
     "The project tools are for a site watched over time: its runs, its pages, search inside a run, "
     "and its change record. search_web searches the web for pages whose URLs you do not know; "
     "list_pages with q searches only inside a project's run. "
+    "run_agent hands a research question to an agent that searches and reads pages on its own, "
+    "returning a job for get_job; continue_agent carries on a run that stopped at its credit limit. "
     "A long tool may hand back a job: get_job follows it and cancel_job stops it. "
     "Blocked pages are reported as blocked, never as missing."
 )
@@ -96,7 +98,7 @@ INSTRUCTIONS = (
 # on a second server later, built with auth in its constructor. The registry is
 # what carries the descriptions across: a description is the only thing an
 # assistant has to pick a tool by, and re-registering without them would leave
-# fifteen nameless verbs.
+# seventeen nameless verbs.
 _TOOLS: "list[tuple]" = []
 
 # What each tool does to the world, in the hints MCP clients read. A tool that
@@ -366,9 +368,10 @@ class ChangesOut(TypedDict, total=False):
 @with_config(ConfigDict(extra="allow"))
 class JobOut(TypedDict, total=False):
     """A job's state, or its result once finished: a crawl gives crawl_site's answer, a batch scrape_urls',
-    a search search_web's, a run the run record, and `url` one page in full."""
+    a search search_web's, an agent run run_agent's, a run the run record, and `url` one page in full."""
     status: Annotated[Any, Field(description=(
-        "'running' while it goes on; otherwise the finished job's status. On an error, the HTTP status code."))]
+        "'running' while it goes on; otherwise the finished job's status; 'expired' for an agent run past its "
+        "keep date. On an error, the HTTP status code."))]
     job: Annotated[Any, Field(description="While running: {kind, id, project_id} to call again with.")]
     counts: Annotated[Any, Field(description="Pages by outcome so far.")]
     crawl_id: Annotated[Any, Field(description="A crawl: its id.")]
@@ -376,9 +379,22 @@ class JobOut(TypedDict, total=False):
     index: Annotated[Any, Field(description="A finished crawl or batch: every page as {url, title, words, status}.")]
     cursor: Annotated[Any, Field(description="A crawl with more pages: pass it back for the next window.")]
     markdown: Annotated[Any, Field(description="With url: that page's markdown, capped at 12,000 characters.")]
-    id: Annotated[Any, Field(description="A run or a search: its id.")]
+    id: Annotated[Any, Field(description="A run, a search or an agent run: its id.")]
     results: Annotated[Any, Field(description=(
         "A search: the ranked results, as search_web returns them, with page excerpts when it scraped."))]
+    data: Annotated[Any, Field(description=(
+        "A finished agent run: its answer, JSON matching the schema or {text}; {partial} at credit_limit."))]
+    fieldSources: Annotated[Any, Field(description=(
+        "A finished agent run: where each value of data came from, its path (e.g. 'plans[0].price') to {url, "
+        "pageId}; left out first when the answer is too long."))]
+    sources: Annotated[Any, Field(description=(
+        "A finished agent run: the pages its answer rests on, each {url, title, pageId}."))]
+    creditsUsed: Annotated[Any, Field(description="An agent run: credits spent so far, pages and model tokens.")]
+    budget: Annotated[Any, Field(description="An agent run: the most it may spend.")]
+    steps: Annotated[Any, Field(description="An agent run: the steps it has taken.")]
+    stopReason: Annotated[Any, Field(description=(
+        "A finished agent run: why it stopped early, e.g. credit_limit, step_limit or cancelled; empty when it "
+        "finished on its own."))]
     note: Annotated[Any, Field(description="What to do next.")]
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
@@ -388,12 +404,12 @@ class JobOut(TypedDict, total=False):
 @with_config(ConfigDict(extra="allow"))
 class CancelOut(TypedDict, total=False):
     """What a cancel did."""
-    kind: Annotated[Any, Field(description="crawl, run or batch.")]
+    kind: Annotated[Any, Field(description="crawl, run, batch or agent.")]
     id: Annotated[Any, Field(description="The job's id.")]
     project_id: Annotated[Any, Field(description="A run: its project.")]
     outcome: Annotated[Any, Field(description=(
-        "'cancelled' (it had not started), 'cancelling' (it stops after the page in hand), or the status of a job "
-        "that had already ended."))]
+        "'cancelled' (it had not started), 'cancelling' (it stops after the page in hand, or an agent run after "
+        "the step under way), or the status of a job that had already ended."))]
     note: Annotated[Any, Field(description="What a stop keeps and drops.")]
     error: Annotated[Any, Field(description=_ERR)]
     status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
@@ -423,6 +439,42 @@ class SearchWebOut(TypedDict, total=False):
         "a job for the pages still landing."))]
     note: Annotated[Any, Field(description="The cache rule, and what to do next when it is still going.")]
     error: Annotated[Any, Field(description=_ERR)]
+    code: Annotated[Any, Field(description=_CODE)]
+    detail: Annotated[Any, Field(description=_DETAIL)]
+
+
+@with_config(ConfigDict(extra="allow"))
+class AgentOut(TypedDict, total=False):
+    """An agent run: its answer and the pages it rests on once finished, or a job while it works."""
+    id: Annotated[Any, Field(description="The run's id: for get_job and cancel_job with kind 'agent'.")]
+    status: Annotated[Any, Field(description=(
+        "queued/running with a `job` while it works; done, credit_limit (stopped at its budget, data.partial "
+        "holds what it found, continue_agent carries it on), cancelled or error once finished; 'expired' past "
+        "its keep date. On an error, the HTTP status code."))]
+    prompt: Annotated[Any, Field(description="The question as it was asked.")]
+    data: Annotated[Any, Field(description=(
+        "The answer: JSON matching the schema, or {text} without one; {partial} at credit_limit. When the answer "
+        "is too long for 60,000 characters, a string of its JSON text, cut, and the note says where the whole "
+        "answer is."))]
+    fieldSources: Annotated[Any, Field(description=(
+        "Where each value of data came from: its path (e.g. 'plans[0].price', or '[2].name' for a list answer) "
+        "to {url, pageId}, a page the run read. The first thing left out when the answer is too long for 60,000 "
+        "characters, and the note says so."))]
+    sources: Annotated[Any, Field(description=(
+        "The pages the answer rests on, each {url, title, pageId}; the first 50 when the answer had to be cut."))]
+    creditsUsed: Annotated[Any, Field(description="Credits spent so far: pages read plus the model's tokens.")]
+    budget: Annotated[Any, Field(description=(
+        "The most the run may spend: max_credits, or less when the workspace had less left (budgetLimited)."))]
+    budgetLimited: Annotated[Any, Field(description=(
+        "true when the budget was lowered to what the workspace had left when the run started."))]
+    steps: Annotated[Any, Field(description="The steps the agent has taken.")]
+    stopReason: Annotated[Any, Field(description=(
+        "Why it stopped early, e.g. credit_limit, step_limit or cancelled; empty when it finished on its own."))]
+    job: Annotated[Any, Field(description=(
+        "While it works: {kind: 'agent', id} for get_job and cancel_job."))]
+    note: Annotated[Any, Field(description="What to do next, and what was cut and where to get it whole.")]
+    error: Annotated[Any, Field(description=(
+        "When the call failed, or the run ended in error: what went wrong, in words an assistant can act on."))]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
 
@@ -636,18 +688,22 @@ def _excerpts(rows, how, reserve=0):
     return [_summary_page(p, cap, how) for p in shown], index, cap, len(index)
 
 
-def _still_running(kind, job_id, counts=None, project_id=None):
+def _still_running(kind, job_id, counts=None, project_id=None, extra=None):
     """What a long tool answers when its budget ran out.
 
     The job is not cancelled -- it goes on server-side, and `get_job` picks it
     up. Saying so matters: an assistant told only "running" would start the
-    work again.
+    work again. `extra` is merged into the answer, for a kind with more to say
+    while it runs (an agent run's spend so far).
     """
     job = {"kind": kind, "id": job_id}
     if project_id:
         job["project_id"] = project_id
-    return {"status": "running", "job": job, "counts": counts or {},
-            "note": "call get_job with this job to check; it keeps running server-side"}
+    out = {"status": "running", "job": job, "counts": counts or {},
+           "note": "call get_job with this job to check; it keeps running server-side"}
+    if extra:
+        out.update(extra)
+    return out
 
 
 def _walk(job, deadline=None, **how):
@@ -838,7 +894,7 @@ def _scopes():
     return list(getattr(at, "scopes", None) or []) if at else []
 
 
-# Nine of the fifteen tools need write, including every one that fetches a
+# Eleven of the seventeen tools need write, including every one that fetches a
 # page: fetching spends the workspace's credits, so it is not a read however
 # it reads to an assistant asking for one URL. The API answers "this needs the
 # member role", which is true and tells an assistant nothing it can act on --
@@ -1171,6 +1227,242 @@ def search_web(query: Annotated[str, Field(
                     return _still_running("search", out.get("id", ""))
                 return _search_result(out, running=True)
             return _search_result(out)
+    return _safe(go)
+
+
+# An agent run's answer past RESULT_BUDGET: the sources it keeps first.
+AGENT_SOURCES_CAP = 50
+AGENT_POLL = ("an agent works for minutes: call get_job with this job every 30 to 60 seconds; it keeps running "
+              "server-side, and cancel_job stops it")
+AGENT_ACCEPTING = ("an identical run_agent call is still being accepted; call run_agent again in a few seconds "
+                   "to get its job")
+AGENT_CONTINUE_ACCEPTING = ("an identical continue_agent call is still being accepted; call continue_agent again in "
+                            "a few seconds to get the new run's job")
+AGENT_EXPIRED = "this agent run is past its keep date (7 days); its answer is no longer kept"
+AGENT_CANCEL_NOTE = ("a queued run stops at once; a running one stops before its next step, the step under way "
+                     "finishing first. Pages and model tokens already used stay charged.")
+
+
+def _key_in_flight(exc):
+    """A 409 saying the first request with this idempotency key is still being
+    accepted: code in_flight, or only the message on an API from before that
+    code. Every other 409 is a refusal about the run."""
+    return exc.status == 409 and (exc.code == "in_flight" or "Idempotency-Key" in str(exc.detail or ""))
+
+
+def _agent_answer(env):
+    """An agent run as run_agent and get_job both answer it: the job while it
+    works, with what it has spent so far, and the result once finished."""
+    if _running(env.get("status")):
+        return _still_running("agent", env.get("id", ""), extra={
+            "budget": env.get("budget"), "creditsUsed": env.get("creditsUsed"), "steps": env.get("steps"),
+            "note": AGENT_POLL})
+    return _agent_result(env)
+
+
+def _agent_result(env):
+    """A finished agent run, shaped once, inside RESULT_BUDGET.
+
+    The answer is what was asked for, so it is cut last. `fieldSources` goes
+    first -- it says where each value came from, which the sources mostly say
+    too -- then the sources go down to the first fifty, and only then is
+    `data` replaced by its JSON text, cut to what the rest leaves. Either way
+    the note says where the whole answer is.
+    """
+    rid = env.get("id", "")
+    status = env.get("status")
+    sources = env.get("sources") if isinstance(env.get("sources"), list) else []
+    field_sources = env.get("fieldSources") if isinstance(env.get("fieldSources"), dict) else {}
+    data = env.get("data")
+    out = {"id": rid, "status": status, "prompt": env.get("prompt", ""), "data": data,
+           "fieldSources": field_sources, "sources": sources,
+           "creditsUsed": env.get("creditsUsed"), "budget": env.get("budget"),
+           "budgetLimited": env.get("budgetLimited"), "steps": env.get("steps"),
+           "stopReason": env.get("stopReason", "")}
+    if env.get("error"):
+        out["error"] = env["error"]
+    notes = []
+    if status == "credit_limit" and env.get("continuedBy"):
+        # Already carried on: a second continue is refused, and the answer
+        # that replaces this partial is the other run's.
+        notes.append(f"the run stopped at its credit budget and was carried on by run {env['continuedBy']}: "
+                     "get_job with that id for its answer")
+    elif status == "credit_limit":
+        notes.append("the run stopped at its credit budget before it finished: data.partial holds what it had "
+                     f"found by then, and continue_agent with id='{rid}' and a new max_credits carries it on "
+                     "from where it stopped")
+    elif status == "error":
+        notes.append("the run failed and error says why; pages and model tokens it used stay charged")
+    out["note"] = ". ".join(notes)
+    if _cost(out) <= RESULT_BUDGET:
+        return out
+
+    whole = f"the full answer is at GET /api/v1/agent/{rid} and via the SDK's get_agent('{rid}')"
+    # Only a map that was there is said to be left out.
+    dropped = bool(field_sources)
+
+    def shape(kept, value, data_cut):
+        cuts = []
+        if dropped:
+            cuts.append("fieldSources is left out")
+        if len(kept) < len(sources):
+            cuts.append(f"sources lists the first {len(kept)} of {len(sources)}")
+        if data_cut:
+            cuts.append("data is the answer's JSON text, cut")
+        said = ", ".join(cuts[:-1]) + " and " + cuts[-1] if len(cuts) > 1 else "".join(cuts)
+        shaped = {**out, "sources": kept, "data": value,
+                  "note": ". ".join(notes + [said + f" to stay inside {RESULT_BUDGET:,} characters; " + whole])}
+        shaped.pop("fieldSources")
+        return shaped
+
+    if dropped:
+        shaped = shape(sources, data, False)
+        if _cost(shaped) <= RESULT_BUDGET:
+            return shaped
+    kept = sources
+    if len(sources) > AGENT_SOURCES_CAP:
+        kept = sources[:AGENT_SOURCES_CAP]
+    # However long their titles, the sources leave half the budget to the answer.
+    while kept and _cost(shape(kept, "", True)) > RESULT_BUDGET // 2:
+        kept = kept[:len(kept) // 2]
+    shaped = shape(kept, data, False)
+    if _cost(shaped) <= RESULT_BUDGET:
+        return shaped
+    # The longest cut that fits, found by halving: a character weighs one to
+    # six in the answer's JSON (quotes, backslashes, anything not ASCII), so
+    # one measured step can overshoot by most of the answer.
+    text = json.dumps(data, ensure_ascii=False)
+
+    def cut_at(n):
+        return shape(kept, text[:n] + f"… [{len(text) - n} more characters]", True)
+
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _cost(cut_at(mid)) <= RESULT_BUDGET:
+            lo = mid
+        else:
+            hi = mid - 1
+    return cut_at(lo)
+
+
+@tool(title="Run a research agent",
+      annotations=_acts(),
+      description="Hand a research question to an agent that searches the web, maps sites and reads pages on its "
+                  "own, then answers with the sources it used.\n"
+                  "Use it for questions that need several pages or sites to answer. When you know what to fetch, "
+                  "search_web and scrape_urls are quicker and cheaper.\n"
+                  "Inputs: prompt says what to find, e.g. 'the monthly price of each plan on example.com'. urls "
+                  "gives pages to start from, e.g. ['https://example.com/pricing']. schema shapes the answer, e.g. "
+                  "{\"type\": \"object\", \"properties\": {\"plans\": {\"type\": \"array\"}}}; without one the "
+                  "answer is {\"text\": ...}. allowed_domains=['example.com'] keeps it to those sites.\n"
+                  "Cost: pages are charged as they are read, and a page the site refuses is free; the model's "
+                  "tokens at the model provider's price plus 20%. max_credits caps the whole run, 2,000 by "
+                  "default; a run that reaches it stops with what it found, and continue_agent carries it on.\n"
+                  "Timing: it returns at once with a job, as an agent works for minutes. Call "
+                  "get_job(kind='agent', id=...) every 30 to 60 seconds; cancel_job stops it. Calling run_agent "
+                  "again with the same inputs in the same ten-minute window returns that run, not a new one.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'.")
+def run_agent(prompt: Annotated[str, Field(
+                  description="What the agent should find out, 1 to 10,000 characters, as a question or a "
+                              "task.")],
+              urls: Annotated[list[str] | None, Field(
+                  description="Up to 20 absolute http(s) URLs for the agent to start from; omit to let it "
+                              "search.")] = None,
+              schema: Annotated[dict | None, Field(
+                  description="A JSON Schema object whose type is object or array; the answer then matches "
+                              "it. Omit for a text answer, {\"text\": ...}.")] = None,
+              allowed_domains: Annotated[list[str] | None, Field(
+                  description="Up to 20 sites the agent stays within, e.g. ['example.com']; omit for the "
+                              "whole web.")] = None,
+              max_credits: Annotated[int | None, Field(
+                  description="The most the run may spend, 1 to 100,000 credits; omit for 2,000.")] = None,
+              max_steps: Annotated[int | None, Field(
+                  description="The most steps the agent may take, 1 to 100; omit for 40.")] = None) -> AgentOut:
+    def go():
+        # The window is part of the key: a retry in the same ten minutes lands
+        # on the same run, and a deliberate re-run later is a new one.
+        key = _key("agent", prompt, urls, schema, allowed_domains, max_credits, max_steps,
+                   int(time.time() // 600))
+        with _client() as s:
+            try:
+                run = s.agent(prompt, urls=urls, schema=schema, max_credits=max_credits, max_steps=max_steps,
+                              allowed_domains=allowed_domains, idempotency_key=key)
+            except MeshArcError as exc:
+                # The first request with this key is still being accepted, and
+                # this answer carries no run id: asking again shortly gets it.
+                # The API says so with code in_flight (an API from before that
+                # code said it only in the message); any other 409 is a
+                # refusal, and goes back as an error.
+                if _key_in_flight(exc):
+                    return {"status": "running", "note": AGENT_ACCEPTING}
+                raise
+            # A replayed key answers with the first stored envelope, which may
+            # be long out of date: read the run as it stands.
+            run.refresh()
+            return _agent_answer(run.envelope)
+    return _safe(go)
+
+
+@tool(title="Continue a stopped agent run",
+      annotations=_acts(),
+      description="Carry on an agent run that stopped at its credit limit (status credit_limit) with a new budget. "
+                  "It starts a new run on the same thread that resumes where the stopped one was, keeps the pages "
+                  "it read and answers in full.\n"
+                  "Use it when run_agent or get_job answered status 'credit_limit' and data.partial is not enough. "
+                  "A run that finished, failed or was cancelled cannot be carried on: ask run_agent again.\n"
+                  "Inputs: id is the stopped run's id, from its answer. max_credits and max_steps are the new run's "
+                  "own, e.g. max_credits=4000; omitted, they are the stopped run's.\n"
+                  "Cost: the pages the stopped run read are not paid for again. New pages are charged as they are "
+                  "read, a refused page free, and the model's tokens at the model provider's price plus 20%, "
+                  "within max_credits.\n"
+                  "Timing: it returns at once with the new run's job, as run_agent does. Call "
+                  "get_job(kind='agent', id=...) with the new id every 30 to 60 seconds; cancel_job stops it. "
+                  "Calling continue_agent again for a run already carried on returns the run that carried it on, "
+                  "not a new one.\n"
+                  "Refusals: code conflict for a run that did not stop at its credit limit (or was carried on "
+                  "meanwhile, by another call), not_found for an unknown id, expired past its 7-day keep date.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'.")
+def continue_agent(id: Annotated[str, Field(
+                       description="The id of the run that stopped at its credit limit, from run_agent's or "
+                                   "get_job's answer.")],
+                   max_credits: Annotated[int | None, Field(
+                       description="The most the new run may spend, 1 to 100,000 credits; omit for the stopped "
+                                   "run's.")] = None,
+                   max_steps: Annotated[int | None, Field(
+                       description="The most steps the new run may take, 1 to 100; omit for the stopped "
+                                   "run's.")] = None) -> AgentOut:
+    def go():
+        # Keyed as run_agent is: a retry in the same ten minutes lands on the
+        # same new run. Later, the stopped run names the run that carried it
+        # on, and that run is the answer.
+        key = _key("continue_agent", id, max_credits, max_steps, int(time.time() // 600))
+        with _client() as s:
+            stopped = s.get_agent(id)
+            if stopped.continued_by:
+                # Already carried on -- by this tool's own earlier call, its
+                # key since past the ten-minute window, or elsewhere. A second
+                # continue would be refused; the run that carried it on is
+                # the answer.
+                carried = s.get_agent(stopped.continued_by)
+                out = _agent_answer(carried.envelope)
+                said = f"run {id} was already carried on by run {stopped.continued_by}; this is that run"
+                out["note"] = ". ".join(n for n in (said, out.get("note")) if n)
+                return out
+            try:
+                run = stopped.continue_(max_credits=max_credits, max_steps=max_steps, idempotency_key=key)
+            except MeshArcError as exc:
+                # Only the key still being accepted is answered as running.
+                # The API's other 409s -- a run that did not stop at its
+                # limit, or was already carried on -- are refusals about the
+                # run, and go back as errors.
+                if _key_in_flight(exc):
+                    return {"status": "running", "note": AGENT_CONTINUE_ACCEPTING}
+                raise
+            # A replayed key answers with the first stored envelope: read the
+            # new run as it stands.
+            run.refresh()
+            return _agent_answer(run.envelope)
     return _safe(go)
 
 
@@ -1601,30 +1893,33 @@ def get_changes(project_id: ProjectId, run_id: RunId = None,
     return _safe(go)
 
 
-JobKind = Annotated[Literal["crawl", "run", "batch"], Field(
-    description="'crawl' (crawl_site), 'run' (start_run) or 'batch' (scrape_urls with several URLs).")]
+JobKind = Annotated[Literal["crawl", "run", "batch", "agent"], Field(
+    description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls with several URLs) or 'agent' "
+                "(run_agent or continue_agent).")]
 JobId = Annotated[str, Field(description="The job's id.")]
 JobProject = Annotated[str | None, Field(description="A run's project id; required for a run, ignored otherwise.")]
 
 
 @tool(title="Follow a long-running job",
       annotations=READS_STORED,
-      description="Check on a crawl, run, batch or web search a tool handed back as a job, and return its result "
-                  "once finished.\n"
+      description="Check on a crawl, run, batch, web search or agent run a tool handed back as a job, and return "
+                  "its result once finished.\n"
                   "Call it when a tool answered with status 'running' and a job; repeating that tool is not needed. "
-                  "To stop a crawl, run or batch use cancel_job. For a project's stored pages use list_pages.\n"
+                  "To stop a crawl, run, batch or agent run use cancel_job. For a project's stored pages use "
+                  "list_pages.\n"
                   "Inputs: kind, id and project_id come from the 'job' object; a crawl_site crawl_id is a crawl's "
                   "id. For a crawl, url reads one page in full, even mid-crawl, and cursor from the last answer "
                   "reads the next window.\n"
                   "Behaviour: it answers at once and never waits, so call it again every 10 to 30 seconds while the "
-                  "status is 'running'. A finished crawl answers as crawl_site does (up to 50 pages excerpted per "
-                  "window), a batch as scrape_urls, a search as search_web, a run with its record. A scraping "
-                  "search whose pages are still landing answers with its results and the job. A crawl expires a day "
-                  "after it started unless kept, then answers 404.\n"
+                  "status is 'running', or every 30 to 60 for an agent run. A finished crawl answers as crawl_site "
+                  "does (up to 50 pages excerpted per window), a batch as scrape_urls, a search as search_web, an "
+                  "agent run as run_agent, a run with its record. A scraping search whose pages are still landing "
+                  "answers with its results and the job. A crawl expires a day after it started unless kept, then "
+                  "answers 404; an agent run is kept 7 days, then answers with status 'expired'.\n"
                   "Read-only and free: it reads stored data and never fetches.")
-def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search"], Field(
-                description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls with several URLs) or "
-                            "'search' (search_web).")],
+def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search", "agent"], Field(
+                description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls with several URLs), "
+                            "'search' (search_web) or 'agent' (run_agent or continue_agent).")],
             id: JobId,
             project_id: JobProject = None,
             url: Annotated[str | None, Field(
@@ -1682,7 +1977,17 @@ def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search"], Field(
                 # go back now, with the job, rather than a bare "running".
                 return _search_result(out, running=True) if out.get("data") else _still_running("search", id)
             return _search_result(out)
-        return {"error": f"kind must be crawl, run, batch or search, not {kind!r}", "code": "validation"}
+        if kind == "agent":
+            try:
+                run = s.get_agent(id)
+            except MeshArcError as exc:
+                # Past its keep date the run is gone, which is an answer about
+                # the run, not a failure of this call.
+                if exc.status == 410:
+                    return {"status": "expired", "id": id, "note": AGENT_EXPIRED}
+                raise
+            return _agent_answer(run.envelope)
+        return {"error": f"kind must be crawl, run, batch, search or agent, not {kind!r}", "code": "validation"}
     return _safe(go)
 
 
@@ -1693,13 +1998,14 @@ CANCEL_NOTE = ("queued work is dropped at once; a page being read finishes first
 
 @tool(title="Cancel a running job",
       annotations=_acts(destructive=True, idempotent=True, open_world=False),
-      description="Stop a crawl, run or batch that is still going.\n"
+      description="Stop a crawl, run, batch or agent run that is still going.\n"
                   "Use it when the work should not finish: a crawl started too wide, a run blocking the next "
-                  "start_run (which answers 409 meanwhile), a batch of the wrong URLs. To check a job without "
-                  "stopping it use get_job.\n"
+                  "start_run (which answers 409 meanwhile), a batch of the wrong URLs, an agent run on the wrong "
+                  "question. To check a job without stopping it use get_job.\n"
                   "Inputs: kind and id come from the 'job' object, or a crawl_site crawl_id with kind='crawl'. A "
                   "run also needs project_id; list_runs shows which run is still going.\n"
-                  "Effect: queued work is dropped and the page in hand finishes. Pages already read stay. A stop "
+                  "Effect: queued work is dropped and the page in hand finishes; an agent run stops before its "
+                  "next step, and the pages and model tokens it used stay charged. Pages already read stay. A stop "
                   "cannot be undone; run the work again to resume. A finished job is left alone, so asking twice is "
                   "harmless.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
@@ -1742,11 +2048,16 @@ def cancel_job(kind: JobKind, id: JobId, project_id: JobProject = None) -> Cance
             s.cancel_batch(id)
             return {"kind": "batch", "id": id,
                     "outcome": "cancelled" if status == "queued" else "cancelling", "note": CANCEL_NOTE}
-        return {"error": f"kind must be crawl, run or batch, not {kind!r}", "code": "validation"}
+        if kind == "agent":
+            # The API says what it did: cancelled (queued), cancelling (the
+            # step under way finishes first), or a finished run's status.
+            answer = s.get_agent(id).cancel() or {}
+            return {"kind": "agent", "id": id, "outcome": answer.get("status"), "note": AGENT_CANCEL_NOTE}
+        return {"error": f"kind must be crawl, run, batch or agent, not {kind!r}", "code": "validation"}
     return _safe(go)
 
 
-# Stdio's server, built now that the fifteen are declared. Hosted mode
+# Stdio's server, built now that the seventeen are declared. Hosted mode
 # builds its own in `authorize`, because auth is set in the constructor.
 server = _build()
 
@@ -1873,7 +2184,7 @@ def _transport_security(public_url):
 
 
 def authorize(issuer, public, secret):
-    """The hosted server: the same fifteen tools, with OAuth attached.
+    """The hosted server: the same seventeen tools, with OAuth attached.
 
     A server of its own rather than the stdio one with auth bolted on after
     the fact. `token_verifier` and `auth` are constructor arguments, and

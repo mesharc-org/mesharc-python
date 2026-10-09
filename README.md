@@ -6,6 +6,8 @@ The Python client for the [MeshArc](https://mesharc.dev) API: a URL in, clean co
 - **Crawl** a whole site with no project to set up first, and keep it as one if it turns out to be worth watching.
 - **Map** what a site declares in its sitemaps before fetching any of it.
 - **Search** the web for pages whose URLs you do not know, and read each result's page in the same call.
+- **Ask** the agent a question: it searches, reads pages and answers, in the shape of a schema if you give one, with the pages its answer rests on. (Not live on mesharc.dev yet.)
+- **Monitor** a search or a question: asked again hourly, daily or weekly, each answer compared with the last, a webhook told when it changed. (Not live on mesharc.dev yet.)
 - **Watch** a site over time: projects, scheduled runs, and a change record — pages added, removed, modified, field by field.
 
 Python 3.10 or newer. One dependency (`httpx`). Fully typed.
@@ -159,13 +161,140 @@ print(out["engine"], out["cached"], out["creditsUsed"])
 again = arc.get_search(out["id"])       # a search started earlier, by id
 for s in arc.searches(q="python"):      # the workspace's searches, newest first
     print(s["id"], s["query"], s["status"], s["resultCount"], s["creditsUsed"])
+
+news = arc.web_search("python release", news=True, freshness="day")   # the engines' news results
+for hit in news["data"]:
+    print(hit["publisher"], hit["age"], hit["title"])                  # who published it, and how long ago ('20h')
+more = arc.web_search("python packaging guide", page=2)               # results 11-20
 ```
 
 `web_search` waits for the results and returns the whole envelope, the hits under `data`. A search is `queued`, `running`, `done`, `blocked` or `error`: `blocked` — every engine refused — is returned, not raised; `error` raises `MeshArcError`. A search that scrapes stays `running` until its pages land. `scrape=` also takes a dict, sent as given (`{"formats": ["markdown", "links"], "maxCredits": 20}`); `country=` and `lang=` say where and in what language to search; `wait=False` returns at once, and `timeout_s` is how long the API holds the request (60 s by default, 120 at most) before the client polls.
 
-A search needs a key that can write, and it spends credits. The results page costs the engine that read it; a results page every engine refused is free. An equal search — same query, `country`, `lang`, `freshness` and domains — within an hour of a finished one comes from the cache (`cached` is true) with no charge for the results page. Scraped pages are charged, cached or not.
+`news=True` searches the engines' news results rather than the web's (one or the other per search); each news hit also carries `publisher` and `age`, as the engine put it (`"20h"`). `page=` is which results page, 1 to 10: page 2 is results 11–20, and each page is its own search with its own charge. **`news=` and `page=` need an API with those features**: they are on the API's feature branch, not yet on mesharc.dev.
+
+A search needs a key that can write, and it spends credits. The results page costs the engine that read it; a results page every engine refused is free. An equal search — same query, `news`, `page`, `country`, `lang`, `freshness` and domains — within an hour of a finished one (ten minutes for news) comes from the cache (`cached` is true) with no charge for the results page. Scraped pages are charged, cached or not.
 
 `arc.search(project_id, q)` is something else: it searches the pages a project has stored, not the web (see below).
+
+## Asking the agent
+
+**The agent route (`/agent`) is not live on mesharc.dev yet**; web search is. The client and the MCP tools are ready for it. The agent's webhook, `connection_id`, `continue_()` and `field_sources` need an API with those features too: they are on the API's feature branch, not yet on mesharc.dev.
+
+The agent takes a question, searches the web, maps sites and reads pages on its own, and answers with the pages it used. Give it a schema and the answer comes back in that shape:
+
+```python
+run = arc.agent(
+    "What does each plan on example.com cost per month?",
+    urls=["https://example.com/pricing"],   # pages to start from, up to 20; omit to let it search
+    allowed_domains=["example.com"],        # keep it to these sites, up to 20
+    schema={                                # a JSON Schema of type object or array
+        "type": "object",
+        "properties": {"plans": {"type": "array", "items": {"type": "object", "properties": {
+            "name": {"type": "string"}, "monthly": {"type": "number"}}}}},
+    },
+    max_credits=500,                        # the most the run may spend: 1 to 100,000, 2,000 by default
+    max_steps=20,                           # the most steps it may take: 1 to 100, 40 by default
+)
+
+out = run.wait()                            # blocks until it finishes; the envelope
+print(out["status"], out["creditsUsed"], out["steps"])
+print(run.data)                             # {'plans': [...]}, matching the schema
+for src in run.sources:                     # the pages the answer rests on
+    print(src["url"], src["title"])
+print(run.field_sources)                    # {'plans[0].monthly': {'url': ..., 'pageId': ...}, ...}
+```
+
+`agent` returns an `AgentRun` at once, queued or running; the prompt is up to 10,000 characters. `timeout_s=` asks the API to hold the request for the answer (120 s at most). Without a schema the answer is `{"text": ...}`. `field_sources` says where each value of the answer came from: its path (`"plans[0].monthly"`, or `"[2].name"` for a list answer) to `{url, pageId}`, a page the run read.
+
+```python
+run = arc.agent(
+    "What does each plan on example.com cost per month?",
+    webhook={"url": "https://hooks.example.com/mesharc", "events": ["agent.completed", "agent.failed"]},
+    connection_id="conn_...",               # run on one of the workspace's own LLM connections
+)
+print(run.webhook_secret)                   # once: the secret the webhook's messages are signed with
+```
+
+`webhook=` is a URL, or `{"url", "events", "metadata"}`, told about `agent.started`, `agent.action`, `agent.completed`, `agent.failed` and `agent.cancelled` (all five by default); its signing secret comes back once, as `run.webhook_secret`; the handle `continue_()` returns carries the stopped run's secret on (the new run keeps the same webhook), and a run reopened with `get_agent` has none. `connection_id=` runs the agent on one of the workspace's own LLM connections — its model, its key, its bill.
+
+To watch it work, follow the trace:
+
+```python
+run = arc.agent("Who maintains the httpx library, and where is it developed?")
+for event in run.trace():                   # follows the run until it ends
+    print(event["seq"], event["kind"], event["text"])
+print(run.wait()["data"])                   # {'text': '...'}
+```
+
+`kind` is `start`, `resume`, `continue`, `model`, `search`, `fetch`, `render`, `map`, `select`, `extract`, `tool`, `busy` or `finish`. `trace(after=seq)` resumes after an event already seen; `follow=False` yields what exists and returns.
+
+```python
+run.cancel()                                # {'id': ..., 'status': 'cancelled'} if it was queued, 'cancelling' if running
+run.refresh()                               # the run as it stands now
+
+again = arc.get_agent(run.id)               # a run started earlier, by id
+for r in arc.agent_runs(status="done"):     # the workspace's runs, newest first
+    print(r["id"], r["status"], r["creditsUsed"], r["prompt"])
+from datetime import date
+for r in arc.agent_runs(model="openai:gpt-5.4-mini", since="2026-10-01", until=date.today()):
+    print(r["id"], r["model"], r["createdAt"])
+```
+
+A run is `queued`, `running`, `done`, `error`, `cancelled` or `credit_limit`. `wait()` returns a run that is `done`, `cancelled` or stopped at `credit_limit` — the run reached `max_credits`, and what it had found is under `data["partial"]` — and raises `MeshArcError` for `error`, with the API's text. A cancel stops a queued run at once and a running one before its next step; what it used stays charged.
+
+`agent_runs` filters by `status`, by `model` (as runs name it) and by when the run was made: at or after `since`, before `until`, each an ISO 8601 date or date-time string or a `date` / `datetime`. A date means its midnight UTC; a date-time without a zone is read as UTC (so a naive `datetime.now()` is your local time read as UTC — pass `datetime.now(timezone.utc)` instead).
+
+A run that stopped at `credit_limit` can be carried on with a new budget:
+
+```python
+out = run.wait()
+if out["status"] == "credit_limit":
+    more = run.continue_(max_credits=1_000)   # a new run, on the same thread
+    print(more.continues_run_id)              # run.id
+    print(more.wait()["data"])                # the full answer, replacing the partial one
+```
+
+`continue_()` returns an `AgentRun` on the new run, which resumes from where the stopped one was, keeps the pages it read (not paid for again) and its webhook, whose secret the new handle's `webhook_secret` carries on. `max_credits` and `max_steps` are the new run's own; left out, they are the stopped run's. The stopped run's `continued_by` names the new one once refreshed. A run that did not stop at its credit limit, was already continued or has no saved progress raises `MeshArcError` 409 with code `conflict`; one past its keep date, 410 `expired`.
+
+A run needs a key that can write, and it spends credits: each page it reads is charged as a read (a refused page is free), and the model's tokens at the model provider's price plus 20% — or 1 credit per 1,000 tokens on the workspace's own connection — all within `max_credits`. A run is kept 7 days; after that `get_agent` raises `MeshArcError` with status 410 and code `expired`, and `trace()` ends quietly.
+
+## Monitors: a search or a question, asked again on a schedule
+
+**Monitors (`arc.monitors`, the `/monitors` route) need an API with that feature**: it is on the API's feature branch, not yet on mesharc.dev.
+
+```python
+monitor = arc.monitors.create(
+    "search",                                         # or "agent"
+    {"query": "mesharc", "freshness": "day"},         # a POST /search or POST /agent body, in the API's own names
+    "daily",                                          # hourly | daily | weekly
+    name="Mentions",
+    webhook="https://hooks.example.com/mesharc",      # told search.changed / agent.changed
+)
+print(monitor["webhookSecret"])                       # once
+
+for r in arc.monitors.runs(monitor["id"]):            # newest first
+    print(r["createdAt"], r["status"], r["changed"], r["summary"])
+
+press = arc.monitors.create("search", {"query": "mesharc", "sources": ["news"]}, "hourly")   # a news monitor
+arc.monitors.update(monitor["id"], schedule="weekly")  # only what is not None is sent
+arc.monitors.update(monitor["id"], webhook="")         # the empty string removes the webhook
+```
+
+Each run is the ordinary search or agent run, charged as one, and is compared with the last run that answered: new, dropped and moved results for a search, the answer's added, changed and removed values for an agent run. A run's `refId` is the search or agent run it made (`arc.get_search` / `arc.get_agent`).
+
+The `request` is the body of a POST /search or POST /agent in the API's own (camelCase) names — `{"query": ..., "includeDomains": [...]}`, `{"prompt": ..., "schema": ..., "maxCredits": ...}` — not `web_search`'s or `agent`'s Python arguments. So a news monitor says `"sources": ["news"]`: `web_search(news=True)` maps its argument to that, and `monitors.create` does not. A monitored search reads its results page only, so `scrape` is refused. `baseline_id=` takes a finished search or agent run with the same request as the first run, not paid for again (for a search, the baseline's `limit` must be at least the monitor's); without it the first run starts now.
+
+| Method | What it does |
+|---|---|
+| `monitors.create(kind, request, schedule, name=None, webhook=None, baseline_id=None, idempotency_key=None)` | Keep a search or agent request on a schedule |
+| `monitors.list(kind=None)` · `monitors.get(id)` | The workspace's monitors, each with its `lastRun`; one monitor |
+| `monitors.update(id, name=None, schedule=None, status=None, webhook=None)` | Change what is not None; `status` is `active` or `paused`, `webhook=""` removes the webhook |
+| `monitors.pause(id)` · `monitors.resume(id)` | Stop and restart the schedule; a slot missed while paused runs once on resuming |
+| `monitors.run(id, idempotency_key=None)` | Run it now; 409 `conflict` while a run is under way |
+| `monitors.runs(id, limit=25)` | Its runs, with `changed`, `summary` and `diff`, following `next` |
+| `monitors.delete(id)` | The monitor and its runs; the searches and agent runs it made stay |
+
+Creating and running a monitor spend credits. Every call but `monitors.list`, `monitors.get` and `monitors.runs` needs a key that can write. A webhook's secret comes back once, as `webhookSecret`, on the call that set it. `arc.monitor()` is something else: the workspace's job queue, what is queued and running (see below).
 
 ## Watching a site: projects and runs
 
@@ -206,7 +335,7 @@ arc.export(project["id"], "pages.csv", dataset="pages", fmt="csv")
 ```python
 me = arc.me()               # the workspace, its plan and limits, credits used and remaining, what this key may do
 usage = arc.usage()         # pages per day, this month by engine
-monitor = arc.monitor()     # what is queued and running
+queue = arc.monitor()       # the job queue: what is queued and running (not arc.monitors)
 meta = arc.meta()           # verdict meanings, engine costs, the config defaults
 keys = arc.keys()
 key = arc.create_key("ci", scopes=["read", "write"], projects=[project["id"]], expires_in_days=90)   # key["key"], once
@@ -234,27 +363,28 @@ except MeshArcError as exc:
 | `forbidden` | 403 | The key's scopes do not allow it |
 | `not_found` | 404 | No such thing — or not one this key may see |
 | `conflict` | 409 | The request contradicts current state |
+| `expired` | 410 | An agent run past its keep date (7 days) |
 | `rate_limited` | 429 | Over the key's rate limit; `X-RateLimit-Reset` says when |
 | `internal` | 500 | Quote `request_id` to support |
 
 `request_id` is the id the API put on the response and in its own logs, so a support conversation starts from one string.
 
-Two more cases: a network failure or a request that hits `timeout` raises `MeshArcError` with `status == 0` and `code` `network` or `timeout`; a job the client stopped waiting for raises `MeshArcTimeoutError` — both a `MeshArcError` and a `TimeoutError` — which carries `job_id` so you can poll it later (`arc.get_crawl(id)`, `arc.batch(id)`, `arc.get_search(id)`).
+Two more cases: a network failure or a request that hits `timeout` raises `MeshArcError` with `status == 0` and `code` `network` or `timeout`; a job the client stopped waiting for raises `MeshArcTimeoutError` — both a `MeshArcError` and a `TimeoutError` — which carries `job_id` so you can poll it later (`arc.get_crawl(id)`, `arc.batch(id)`, `arc.get_search(id)`, `arc.get_agent(id)`).
 
 ## Idempotency and timeouts
 
-- `scrape`, `scrape_one`, `crawl` and `web_search` take `idempotency_key=`: send the same key again within 24 hours and you get the first answer back rather than a second job. The MCP server's `search_web` tool sends none, on purpose: an equal search within the hour of a finished one comes from the cache anyway.
-- Waiting calls take `wait=`, `poll=` (seconds between polls) and `timeout=` (seconds before `TimeoutError`). `wait=False` returns the envelope at once; the default polls every 3 s for up to an hour.
+- `scrape`, `scrape_one`, `crawl`, `web_search`, `agent`, `AgentRun.continue_`, `monitors.create` and `monitors.run` take `idempotency_key=`: send the same key again within 24 hours and you get the first answer back rather than a second job. The MCP server's `search_web` tool sends none, on purpose: an equal search within the hour of a finished one comes from the cache anyway. Its `run_agent` and `continue_agent` tools send their own, made from their inputs and the ten-minute window, so a retry in the same ten minutes lands on the same run and a re-run later is a new one.
+- Waiting calls take `poll=` (seconds between polls) and `timeout=` (seconds before `TimeoutError`), and most take `wait=`: `wait=False` returns the envelope at once. The defaults differ: `scrape`, `batch`, `crawl` (and `Crawl.wait`, `Crawl.pages`) and `runs.start` / `runs.wait` poll every 3 s for up to an hour; `scrape_one` and `web_search` every 2 s for up to ten minutes; `map` / `map_details` and `extract` every 2 s for up to five minutes; `AgentRun.wait` and `AgentRun.trace` every 2 s for up to an hour.
 - `timeout_s` on a single scrape is how long the API itself holds the request open (60 s by default, 120 at most); a slower page comes back as an id and is polled.
 - `MeshArc(..., timeout=150.0)` is the HTTP timeout per request. A request is retried on 429, 502, 503, 504 and network failures when it is safe to repeat — a GET, a DELETE, or a POST with an idempotency key — up to `max_retries` times (2), honouring `Retry-After`.
 
 ## Credits
 
-Every response says what it cost: `credits` on a page, `creditsUsed` on a job envelope, `X-MeshArc-Credits` on the HTTP response. A page costs the engine that read it — a plain fetch 1, a render 4 — and a refused page or a 404 costs nothing. A web search's results page costs the engine that read it, and nothing when every engine refused; an equal search (same query, country, lang, freshness and domains) within an hour of a finished one comes from the cache with no charge for the results page, while the pages it scrapes are charged either way. The schedule and the plans are at [mesharc.dev/docs/billing](https://mesharc.dev/docs/billing).
+Every response says what it cost: `credits` on a page, `creditsUsed` on a job envelope, `X-MeshArc-Credits` on the HTTP response. A page costs the engine that read it — a plain fetch 1, a render 4 — and a refused page or a 404 costs nothing. A web search's results page costs the engine that read it, and nothing when every engine refused; an equal search (same query, news or web, results page, country, lang, freshness and domains) within an hour of a finished one (ten minutes for news) comes from the cache with no charge for the results page, while the pages it scrapes are charged either way. An agent run pays for each page it reads as a read (a refused page is free) and for the model's tokens at the model provider's price plus 20% (1 credit per 1,000 tokens on the workspace's own LLM connection), within its `max_credits` (2,000 by default); `creditsUsed` counts both. A monitor's runs are charged as the searches and agent runs they are. The schedule and the plans are at [mesharc.dev/docs/billing](https://mesharc.dev/docs/billing).
 
 ## The MCP server
 
-The package also ships MeshArc as an MCP server, so Claude Desktop, Claude Code, Cursor and any MCP client can scrape, crawl, map, search the web and read change records as tools. Python 3.10+.
+The package also ships MeshArc as an MCP server, so Claude Desktop, Claude Code, Cursor and any MCP client can scrape, crawl, map, search the web, hand a question to the agent and read change records as tools. Python 3.10+.
 
 There is a hosted one, so most people need install nothing:
 
@@ -275,13 +405,15 @@ MESHARC_API_KEY=mesharc_... mesharc-mcp          # serves over stdio
 claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 ```
 
-Tools: `scrape_urls`, `map_site`, `crawl_site`, `search_web`, `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `start_run`, `list_runs`, `list_pages`, `get_changes`, `get_job`, `cancel_job`. `get_project` shows a project's webhook and its recent deliveries, and `update_project` sets it and sends it a test (`test_webhook=true`). Every tool is a call through this client, and each one's answer is described by an output schema. A tool that fails answers `{error, status}`, with the API's `code` and `request_id` as well when it gave them.
+Tools: `scrape_urls`, `map_site`, `crawl_site`, `search_web`, `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `start_run`, `list_runs`, `list_pages`, `get_changes`, `get_job`, `cancel_job`, `run_agent` and `continue_agent` (the last two not live on mesharc.dev yet: they need the API's agent features, on its feature branch). `get_project` shows a project's webhook and its recent deliveries, and `update_project` sets it and sends it a test (`test_webhook=true`). Every tool is a call through this client, and each one's answer is described by an output schema. A tool that fails answers `{error, status}`, with the API's `code` and `request_id` as well when it gave them.
 
-A result with many pages in it is a map, not the territory: a crawl answers with an index of the pages read (up to 500, fewer if the budget needs the room), an excerpt of as many as a 60,000-character budget pays for (fifty at most), and a count of each page's links rather than the links. Ask for the one page you want on its own with `get_job(kind="crawl", id=…, url=…)`, or carry on through the crawl with `cursor=`. A multi-URL scrape past its budget counts the rest by status and names any that did not come back ok. One page asked for on its own -- `list_pages` with `url`, or `scrape_urls` with a single url (with `full=true` for every format) -- comes back whole, capped at 12,000 characters. A `search_web` answer keeps within the same 60,000 characters, a scraped result's page as an excerpt; `scrape_urls` with `full=true` reads one in full.
+A result with many pages in it is a map, not the territory: a crawl answers with an index of the pages read (up to 500, fewer if the budget needs the room), an excerpt of as many as a 60,000-character budget pays for (fifty at most), and a count of each page's links rather than the links. Ask for the one page you want on its own with `get_job(kind="crawl", id=…, url=…)`, or carry on through the crawl with `cursor=`. A multi-URL scrape past its budget counts the rest by status and names any that did not come back ok. One page asked for on its own -- `list_pages` with `url`, or `scrape_urls` with a single url (with `full=true` for every format) -- comes back whole, capped at 12,000 characters. A `search_web` answer keeps within the same 60,000 characters, a scraped result's page as an excerpt; `scrape_urls` with `full=true` reads one in full. So does an agent's answer: past the budget its `fieldSources` (where each value of the answer came from) are left out first, then its sources are cut, to the first 50 (fewer if they would take more than half the room), and only then is `data` replaced by its JSON text, cut, with a note saying where the full answer is -- `GET /api/v1/agent/{id}`, or `get_agent(id)` in this client.
 
-Hosted, a connection can be approved read-only, and read-only cuts in a place worth knowing: it reads the whole workspace, but it cannot reach the site. Anything that fetches is a write, because it leaves the workspace and usually spends its credits -- `map_site` reads only a site's sitemaps, at a credit per sitemap file, and it is gated with the rest. `list_projects`, `get_project`, `list_runs`, `list_pages`, `get_changes` and `get_job` work; the nine that fetch or write -- `scrape_urls`, `map_site`, `crawl_site`, `search_web`, `create_project`, `update_project`, `delete_project`, `start_run`, `cancel_job` -- answer `{"code": "read_only"}` with what to do about it, until the app is reconnected with 'Also allow changes' ticked (write access). `delete_project` needs more than write: an admin API key, which a connected app never holds, so it only works run locally with such a key.
+Hosted, a connection can be approved read-only, and read-only cuts in a place worth knowing: it reads the whole workspace, but it cannot reach the site. Anything that fetches is a write, because it leaves the workspace and usually spends its credits -- `map_site` reads only a site's sitemaps, at a credit per sitemap file, and it is gated with the rest. `list_projects`, `get_project`, `list_runs`, `list_pages`, `get_changes` and `get_job` work; the eleven that fetch or write -- `scrape_urls`, `map_site`, `crawl_site`, `search_web`, `run_agent`, `continue_agent`, `create_project`, `update_project`, `delete_project`, `start_run`, `cancel_job` -- answer `{"code": "read_only"}` with what to do about it, until the app is reconnected with 'Also allow changes' ticked (write access). `delete_project` needs more than write: an admin API key, which a connected app never holds, so it only works run locally with such a key.
 
-Hosted, a tool that would hold a connection open for minutes — a crawl, a run you asked to wait for, a multi-URL scrape, a web search — hands back a job after `MESHARC_MCP_WAIT` seconds (25 by default, because many MCP hosts time a tool call out sooner). The work carries on server-side; `get_job` picks it up and `cancel_job` stops a crawl, run or batch. A search that scrapes, with its results in and its pages still landing, answers with the results and a job for the pages. Run locally, those tools block as they always have.
+Hosted, a tool that would hold a connection open for minutes — a crawl, a run you asked to wait for, a multi-URL scrape, a web search — hands back a job after `MESHARC_MCP_WAIT` seconds (25 by default, because many MCP hosts time a tool call out sooner). The work carries on server-side; `get_job` picks it up and `cancel_job` stops a crawl, run, batch or agent run. A search that scrapes, with its results in and its pages still landing, answers with the results and a job for the pages. Run locally, those tools block as they always have.
+
+`run_agent` does not wait at all, hosted or local: an agent works for minutes, so it hands back a job at once, with what the run has spent so far. `get_job(kind="agent", id=…)` follows it -- every 30 to 60 seconds -- and answers with the result once it finishes; `cancel_job(kind="agent", id=…)` stops it before its next step, and what it used stays charged. A run is kept 7 days; after that `get_job` answers `status: "expired"`. A retry that lands on a run already finished answers with its result. A run that stopped at its budget (`status: "credit_limit"`, what it had found under `data.partial`) is carried on by `continue_agent(id=…, max_credits=…)`: a new run on the same thread that resumes where it stopped and keeps the pages it read, not paid for again. It hands back the new run's job the same way. A run that did not stop at its limit is refused with code `conflict`; asked again for a run already carried on — a retry past the ten-minute key window included — it answers with the run that carried it on, and starts nothing.
 
 ### Hosting it yourself
 

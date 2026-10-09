@@ -26,13 +26,14 @@ from __future__ import annotations
 import os
 import random
 import time
+from datetime import date
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 __version__ = "0.6.0"
-__all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl"]
+__all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl", "AgentRun"]
 
 DEFAULT_BASE = "https://api.mesharc.dev"
 DEFAULT_TIMEOUT = 150.0
@@ -77,6 +78,11 @@ def _running(status: Any) -> bool:
 
 def _cursor_of(next_url: str) -> str:
     return (parse_qs(urlparse(next_url).query).get("cursor") or [""])[0]
+
+
+def _iso(when: Union[str, date]) -> str:
+    """A date or date-time as the API reads it: ISO 8601, a string as given."""
+    return when.isoformat() if isinstance(when, date) else when
 
 
 class _Http:
@@ -236,6 +242,112 @@ class _Runs:
         return self._h("POST", f"/projects/{project_id}/runs/{run_id}/cancel")
 
 
+class _Monitors:
+    """A search or an agent request, kept and run again on a schedule: ``arc.monitors``.
+
+    Not to be confused with ``arc.monitor()``, which is the workspace's job queue.
+    """
+
+    def __init__(self, http: _Http) -> None:
+        self._h = http
+
+    def create(self, kind: str, request: Json, schedule: str, name: Optional[str] = None,
+               webhook: Union[str, Json, None] = None, baseline_id: Optional[str] = None,
+               idempotency_key: Optional[str] = None) -> Json:
+        """Keep a search or an agent request and run it on a schedule.
+
+        ``kind`` is ``search`` or ``agent``; ``request`` is the body of a
+        POST /search or POST /agent in the API's own (camelCase) names
+        (``{"query": ..., "freshness": "day"}``, ``{"prompt": ...,
+        "schema": ..., "maxCredits": ...}``), checked as those check it;
+        ``schedule`` is ``hourly``, ``daily`` or ``weekly``. ``name`` is the
+        query or prompt when left out. A monitored search reads its results
+        page only, so ``scrape`` is refused. A news monitor's request says
+        so in the API's name, ``"sources": ["news"]``: ``web_search(news=True)``
+        maps its argument to that, and ``create`` does not. Each run is the
+        ordinary search or agent run, charged as one, and is compared with
+        the last run that answered: new, dropped and moved results, or the
+        answer's added, changed and removed values.
+
+        ``webhook`` is a URL, or ``{"url", "events", "metadata"}``, told
+        ``search.changed`` / ``agent.changed`` when a run found something
+        different; the secret its messages are signed with comes back once,
+        as ``webhookSecret``. ``baseline_id`` is a finished search or agent
+        run with the same request, taken as the first run and not paid for
+        again; without it the first run starts now. A search baseline's
+        ``limit`` must be at least the monitor's.
+
+        Spends credits and needs a key that can write. Returns the monitor.
+        """
+        body: Json = {"kind": kind, "request": request, "schedule": schedule}
+        for key, value in (("name", name), ("webhook", webhook), ("baselineId", baseline_id)):
+            if value is not None:
+                body[key] = value
+        return self._h("POST", "/monitors", json=body, idempotency_key=idempotency_key)
+
+    def list(self, kind: Optional[str] = None) -> List[Json]:
+        """The workspace's monitors, newest first, each with its last run under
+        ``lastRun``. ``kind`` keeps ``search`` or ``agent`` ones."""
+        return self._h("GET", "/monitors", params={"kind": kind} if kind else None)["data"]
+
+    def get(self, monitor_id: str) -> Json:
+        """One monitor, with its last run."""
+        return self._h("GET", f"/monitors/{monitor_id}")
+
+    def update(self, monitor_id: str, name: Optional[str] = None, schedule: Optional[str] = None,
+               status: Optional[str] = None, webhook: Union[str, Json, None] = None) -> Json:
+        """Change a monitor's ``name``, ``schedule``, ``status`` (``active`` or
+        ``paused``) or ``webhook``. Only the ones that are not None are sent;
+        ``webhook=""`` removes the webhook, and a new one's secret comes back
+        once, as ``webhookSecret``. Needs a key that can write."""
+        body: Json = {key: value for key, value in (("name", name), ("schedule", schedule), ("status", status),
+                                                    ("webhook", webhook)) if value is not None}
+        return self._h("PATCH", f"/monitors/{monitor_id}", json=body)
+
+    def pause(self, monitor_id: str) -> Json:
+        """No more scheduled runs until it is resumed; a run under way finishes."""
+        return self._h("POST", f"/monitors/{monitor_id}/pause")
+
+    def resume(self, monitor_id: str) -> Json:
+        """Scheduled again: a slot that passed while it was paused runs once, at the next tick."""
+        return self._h("POST", f"/monitors/{monitor_id}/resume")
+
+    def run(self, monitor_id: str, idempotency_key: Optional[str] = None) -> Json:
+        """Run it now, paused or not; the schedule counts on from this run.
+
+        Spends credits and needs a key that can write. Returns the new run,
+        ``running`` (``error`` with the reason under ``error`` when it could
+        not start); its ``refId`` is the search or agent run it made
+        (``get_search`` / ``get_agent``). Raises ``MeshArcError`` 409 (code
+        ``conflict``) while a run is under way.
+        """
+        return self._h("POST", f"/monitors/{monitor_id}/run", idempotency_key=idempotency_key)
+
+    def runs(self, monitor_id: str, limit: int = 25) -> Iterator[Json]:
+        """Every run of a monitor, newest first, each with what changed since
+        the run before that answered (``changed``, ``summary``, ``diff``).
+        ``limit`` is the page size; follows the ``next`` link until the
+        list ends.
+        """
+        cursor = ""
+        while True:
+            params: Dict[str, Any] = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            page = self._h("GET", f"/monitors/{monitor_id}/runs", params=params)
+            for row in page.get("data") or []:
+                yield row
+            cursor = _cursor_of(page["next"]) if page.get("next") else ""
+            if not cursor:
+                return
+
+    def delete(self, monitor_id: str) -> Json:
+        """The monitor and its runs. The searches and agent runs it made stay
+        in the workspace's history; an agent run it has under way is
+        stopped. Returns ``{id, deleted: true}``."""
+        return self._h("DELETE", f"/monitors/{monitor_id}")
+
+
 class Crawl:
     """A crawl started by ``arc.crawl(url)``: a handle on a running job.
 
@@ -329,6 +441,178 @@ class Crawl:
         return self.envelope
 
 
+class AgentRun:
+    """An agent run started by ``arc.agent(prompt)``: a handle on the job.
+
+    ``wait()`` blocks until it finishes and returns the envelope, the answer
+    under ``data``; ``trace()`` yields what the agent does as it does it;
+    ``cancel()`` stops it; ``continue_()`` carries on a run that stopped at
+    its credit limit. ``envelope`` is the last envelope seen.
+    """
+
+    def __init__(self, http: _Http, envelope: Json) -> None:
+        self._h = http
+        self.id: str = envelope["id"]
+        self.envelope: Json = envelope
+        # Kept apart from the envelope: the API sends it once, on the POST,
+        # and a refresh() would otherwise lose it.
+        self._webhook_secret: str = envelope.get("webhookSecret") or ""
+
+    def __repr__(self) -> str:
+        return f"<AgentRun {self.id[:8]} {self.envelope.get('status')}>"
+
+    @property
+    def status(self) -> str:
+        return self.envelope.get("status", "queued")
+
+    @property
+    def data(self) -> Any:
+        """The answer: JSON matching the schema, ``{"text": ...}`` without
+        one, ``{"partial": ...}`` when the run hit its credit limit."""
+        return self.envelope.get("data")
+
+    @property
+    def sources(self) -> List[Json]:
+        """The pages the answer rests on, as ``{url, title, pageId}``."""
+        return self.envelope.get("sources") or []
+
+    @property
+    def field_sources(self) -> Json:
+        """Where each value of ``data`` came from: its path (``"plans[0].price"``,
+        or ``"[2].name"`` for a list answer) to ``{url, pageId}``, a page
+        this run read. ``{}`` when the API said nothing."""
+        return self.envelope.get("fieldSources") or {}
+
+    @property
+    def webhook_secret(self) -> str:
+        """Returned once, at creation: the secret the run's webhook messages
+        are signed with. A run made by ``continue_()`` carries on its
+        stopped run's webhook and secret, so its handle has the stopped
+        handle's. ``""`` for a run started without a webhook, or one
+        reopened with ``get_agent``."""
+        return self.envelope.get("webhookSecret") or self._webhook_secret
+
+    @property
+    def continues_run_id(self) -> Optional[str]:
+        """The run this one carried on, when it was made by ``continue_()``."""
+        return self.envelope.get("continuesRunId") or None
+
+    @property
+    def continued_by(self) -> Optional[str]:
+        """The run that carried this one on: its answer replaces this one's partial."""
+        return self.envelope.get("continuedBy") or None
+
+    def refresh(self) -> AgentRun:
+        """Read the run as it stands now. Returns the handle."""
+        self.envelope = self._h("GET", f"/agent/{self.id}")
+        return self
+
+    def wait(self, poll: float = 2.0, timeout: float = 3600) -> Json:
+        """Block until the run finishes. Returns the envelope.
+
+        A run that is ``done``, ``cancelled`` or stopped at ``credit_limit``
+        (with what it had under ``data.partial``) is returned; ``error``
+        raises ``MeshArcError`` with the API's text.
+        """
+        deadline = time.time() + timeout
+        while True:
+            status = self.refresh().status
+            if status == "error":
+                raise MeshArcError(502, self.envelope.get("error") or f"agent {status}", "job_failed")
+            if not _running(status):
+                return self.envelope
+            if time.time() >= deadline:
+                raise MeshArcTimeoutError(f"agent {self.id} is still {status} after {timeout}s", self.id)
+            time.sleep(poll)
+            self._h.pace()
+
+    def cancel(self) -> Json:
+        """Stop the run. Returns the API's answer, ``{id, status}``: a queued
+        run is ``cancelled``, a running one ``cancelling`` (it stops before
+        its next step), a finished one keeps its status. ``refresh()``
+        reads where it ended."""
+        return self._h("DELETE", f"/agent/{self.id}")
+
+    def continue_(self, max_credits: Optional[int] = None, max_steps: Optional[int] = None, timeout_s: float = 0,
+                  idempotency_key: Optional[str] = None) -> AgentRun:
+        """Carry on a run that stopped at ``credit_limit``, with a new budget.
+
+        Returns an ``AgentRun`` on the new run, queued or running unless
+        ``timeout_s`` asks the API to hold the request (120 at most). It
+        resumes from where this one stopped, keeps the pages it read (not
+        paid for again) and its webhook, whose secret the new handle's
+        ``webhook_secret`` carries on from this one, and answers in full; its
+        ``continues_run_id`` is this run, and this run's ``continued_by``
+        the new one once refreshed. ``max_credits`` and ``max_steps`` are
+        the new run's own; left out, they are this run's.
+
+        Spends credits and needs a key that can write. Raises
+        ``MeshArcError`` 409 (code ``conflict``) for a run that did not stop
+        at its credit limit, was already continued or has no saved
+        progress, 404 for no such run and 410 (``expired``) past its keep
+        date.
+        """
+        body: Json = {}
+        if max_credits is not None:
+            body["maxCredits"] = max_credits
+        if max_steps is not None:
+            body["maxSteps"] = max_steps
+        if timeout_s > 0:
+            body["timeout"] = min(timeout_s, 120)
+        run = AgentRun(self._h, self._h("POST", f"/agent/{self.id}/continue", json=body,
+                                        idempotency_key=idempotency_key))
+        # The API carries the webhook and its secret over to the new run, but
+        # the continue answer does not repeat the secret: keep this run's.
+        run._webhook_secret = run._webhook_secret or self.webhook_secret
+        return run
+
+    def trace(self, after: int = 0, follow: bool = True, poll: float = 2.0,
+              timeout: float = 3600) -> Iterator[Json]:
+        """What the agent did, step by step, as ``{seq, t, kind, text, ...}``.
+
+        ``kind`` is start, resume, continue, model, search, fetch, render,
+        map, select, extract, tool, busy or finish. ``after`` is the ``seq``
+        of the last event already seen, to resume after it. With ``follow``
+        this keeps reading until the run ends, polling every ``poll``
+        seconds; ``follow=False`` yields what exists and returns. A run
+        that has expired ends the walk quietly.
+        """
+        deadline = time.time() + timeout
+        while True:
+            live = True
+            if follow:
+                # Read the status before the trace, so the events written
+                # just before the run ended are drained, not missed.
+                try:
+                    live = _running(self.refresh().status)
+                except MeshArcError as exc:
+                    if exc.status == 410:
+                        return
+                    raise
+            while True:
+                try:
+                    page = self._h("GET", f"/agent/{self.id}/trace", params={"after": after, "limit": 500})
+                except MeshArcError as exc:
+                    if exc.status == 410:
+                        return
+                    raise
+                rows = page.get("data") or []
+                for event in rows:
+                    yield event
+                last = page.get("last")
+                moved = last is not None and last != after
+                if last is not None:
+                    after = last
+                if len(rows) < 500 or not moved:
+                    break
+            if not follow or not live:
+                return
+            if time.time() >= deadline:
+                raise MeshArcTimeoutError(f"agent {self.id} is still {self.status} after {timeout}s", self.id)
+            time.sleep(poll)
+            self._h.pace()
+
+
 class MeshArc:
     """One client, one API key, one workspace.
 
@@ -348,6 +632,7 @@ class MeshArc:
         self._h = _Http(key, base, timeout, max_retries)
         self.projects = _Projects(self._h)
         self.runs = _Runs(self._h)
+        self.monitors = _Monitors(self._h)
 
     def extract(self, url: str, config: Optional[Json] = None, wait: bool = True, poll: float = 2.0,
                 timeout: float = 300) -> Json:
@@ -492,14 +777,19 @@ class MeshArc:
                    include_domains: Optional[Iterable[str]] = None, exclude_domains: Optional[Iterable[str]] = None,
                    scrape: Union[bool, Json, None] = None, destination: Optional[str] = None, wait: bool = True,
                    timeout_s: Optional[float] = None, poll: float = 2.0, timeout: float = 600,
-                   idempotency_key: Optional[str] = None) -> Json:
+                   idempotency_key: Optional[str] = None, news: bool = False, page: Optional[int] = None) -> Json:
         """Search the web. Returns the whole envelope, the hits under ``data``.
 
         Needs an API key that can write, and spends credits: a results page
-        every engine refused is free, an equal search (same query,
-        ``country``, ``lang``, ``freshness`` and domains) within the hour of
-        a finished one comes from the cache with no results-page charge, and
-        scraped pages are charged even then. ``freshness`` is ``hour``, ``day``,
+        every engine refused is free, an equal search (same query, ``news``,
+        ``page``, ``country``, ``lang``, ``freshness`` and domains) within the
+        hour of a finished one -- ten minutes for news -- comes from the
+        cache with no results-page charge, and scraped pages are charged
+        even then. ``news=True`` searches the engines' news results instead
+        of the web's, and each hit also carries ``publisher`` and ``age``
+        (as the engine put it, e.g. ``"20h"``). ``page`` is which results
+        page, 1 to 10: page 2 is results 11-20, each page its own search
+        and its own charge. ``freshness`` is ``hour``, ``day``,
         ``week``, ``month`` or ``year``. ``scrape=True`` also fetches each
         hit as markdown; a dict such as ``{"formats": ["markdown", "links"],
         "maxCredits": 20}`` is sent as given. The formats are ``markdown``,
@@ -515,8 +805,10 @@ class MeshArc:
         queued or running, unless ``timeout_s`` is given.
         """
         body: Json = {"query": query}
-        for key, value in (("limit", limit), ("country", country), ("lang", lang), ("freshness", freshness),
-                           ("destination", destination)):
+        if news:
+            body["sources"] = ["news"]
+        for key, value in (("limit", limit), ("page", page), ("country", country), ("lang", lang),
+                           ("freshness", freshness), ("destination", destination)):
             if value is not None:
                 body[key] = value
         if include_domains is not None:
@@ -562,6 +854,93 @@ class MeshArc:
             if cursor:
                 params["cursor"] = cursor
             page = self._h("GET", "/search", params=params)
+            for row in page.get("data") or []:
+                yield row
+            cursor = _cursor_of(page["next"]) if page.get("next") else ""
+            if not cursor:
+                return
+
+    def agent(self, prompt: str, urls: Optional[Iterable[str]] = None, schema: Optional[Json] = None,
+              max_credits: Optional[int] = None, max_steps: Optional[int] = None,
+              allowed_domains: Optional[Iterable[str]] = None, webhook: Union[str, Json, None] = None,
+              connection_id: Optional[str] = None, timeout_s: float = 0,
+              idempotency_key: Optional[str] = None) -> AgentRun:
+        """Hand a question to the agent: it searches, reads pages and answers.
+
+        Needs an API key that can write, and spends credits: pages as they
+        are read (a refused page is free) and the model's tokens at the
+        model provider's price plus 20%; ``max_credits`` caps the run (2000
+        by default on the API). ``connection_id`` runs it on one of the
+        workspace's own LLM connections instead -- its model, its key, its
+        bill -- and the tokens then cost 1 credit per 1,000.
+        ``urls`` are pages to start from, ``allowed_domains`` keeps the run
+        to those sites, ``max_steps`` caps its turns (40 by default).
+        ``schema`` is a JSON Schema whose type is ``object`` or ``array``;
+        the answer under ``data`` then matches it, and without one it is
+        ``{"text": ...}``.
+
+        ``webhook`` is a URL, or ``{"url", "events", "metadata"}``, told
+        about ``agent.started``, ``agent.action``, ``agent.completed``,
+        ``agent.failed`` and ``agent.cancelled`` (all five by default); the
+        secret its messages are signed with comes back once, as
+        ``AgentRun.webhook_secret``.
+
+        Returns an ``AgentRun`` at once, queued or running, unless
+        ``timeout_s`` asks the API to hold the request for the answer (120
+        at most); ``AgentRun.wait()`` waits for it.
+        """
+        body: Json = {"prompt": prompt}
+        if urls is not None:
+            body["urls"] = list(urls)
+        if schema is not None:
+            body["schema"] = schema
+        if max_credits is not None:
+            body["maxCredits"] = max_credits
+        if max_steps is not None:
+            body["maxSteps"] = max_steps
+        if allowed_domains is not None:
+            body["allowedDomains"] = list(allowed_domains)
+        if webhook is not None:
+            body["webhook"] = webhook
+        if connection_id is not None:
+            body["connectionId"] = connection_id
+        if timeout_s > 0:
+            body["timeout"] = min(timeout_s, 120)
+        return AgentRun(self._h, self._h("POST", "/agent", json=body, idempotency_key=idempotency_key))
+
+    def get_agent(self, run_id: str) -> AgentRun:
+        """A handle on an agent run started earlier or elsewhere.
+
+        A run past its keep date (7 days by default) is gone: the API
+        answers 410 and this raises ``MeshArcError`` with status 410 and
+        code ``expired``.
+        """
+        return AgentRun(self._h, self._h("GET", f"/agent/{run_id}"))
+
+    def agent_runs(self, status: Optional[str] = None, limit: int = 25, model: Optional[str] = None,
+                   since: Union[str, date, None] = None, until: Union[str, date, None] = None) -> Iterator[Json]:
+        """Every agent run of the workspace, as summaries.
+
+        ``status`` filters the list (queued, running, done, error,
+        cancelled, credit_limit); ``model`` keeps one model's runs, named
+        as runs name it (``"openai:gpt-5.4-mini"``); ``since`` and ``until``
+        keep the runs made at or after ``since`` and before ``until``, each
+        an ISO 8601 date or date-time string or a ``date`` / ``datetime``.
+        A date means its midnight UTC; a date-time without a zone is read
+        as UTC (so a naive ``datetime.now()`` is your local time read as
+        UTC).
+        ``limit`` is the page size, sent again with the filters on every
+        page. Follows the ``next`` link until the list ends.
+        """
+        filters: Dict[str, Any] = {k: v for k, v in (("status", status), ("model", model),
+                                                     ("since", _iso(since) if since else None),
+                                                     ("until", _iso(until) if until else None)) if v}
+        cursor = ""
+        while True:
+            params: Dict[str, Any] = {"limit": limit, **filters}
+            if cursor:
+                params["cursor"] = cursor
+            page = self._h("GET", "/agent", params=params)
             for row in page.get("data") or []:
                 yield row
             cursor = _cursor_of(page["next"]) if page.get("next") else ""
@@ -674,6 +1053,7 @@ class MeshArc:
         return self._h("GET", "/me/billing")
 
     def monitor(self) -> Json:
+        """What is queued and running in the workspace: the job queue, not ``arc.monitors``."""
         return self._h("GET", "/me/monitor")
 
     def meta(self) -> Json:

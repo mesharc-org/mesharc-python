@@ -25,7 +25,7 @@ RESOURCE = "http://mcp.example.test/mcp"
 EXPECTED = frozenset({
     "scrape_urls", "map_site", "crawl_site", "search_web", "list_projects", "get_project",
     "create_project", "update_project", "delete_project", "list_runs", "list_pages",
-    "get_changes", "start_run", "get_job", "cancel_job",
+    "get_changes", "start_run", "get_job", "cancel_job", "run_agent", "continue_agent",
 })
 
 

@@ -16,7 +16,7 @@ mcp_mod = pytest.importorskip("mesharc.mcp", reason="needs the mcp extra")
 # find and bump.
 EXPECTED = {"scrape_urls", "map_site", "crawl_site", "search_web", "list_projects", "get_project",
             "create_project", "update_project", "delete_project", "list_runs", "list_pages",
-            "get_changes", "start_run", "get_job", "cancel_job"}
+            "get_changes", "start_run", "get_job", "cancel_job", "run_agent", "continue_agent"}
 
 # The tools that only read what the workspace has stored. Everything else
 # reaches a site or changes the workspace, and a read-only connection is
@@ -32,6 +32,7 @@ def test_every_tool_is_listed():
     # 0.4.0 folded five tools into the siblings they overlapped and added
     # delete_project, nineteen becoming fifteen; web search made sixteen in
     # 0.5.0, and 0.6.0 folded get_page into list_pages(url=) for fifteen.
+    # run_agent makes sixteen and continue_agent seventeen.
     assert set(_tools()) == EXPECTED
     assert READ_ONLY < EXPECTED
 
@@ -73,9 +74,9 @@ def test_fixed_choices_are_listed():
         options = [schema] + list(schema.get("anyOf") or [])
         return next(o["enum"] for o in options if "enum" in o)
 
-    assert enum("get_job", "kind") == ["crawl", "run", "batch", "search"]
+    assert enum("get_job", "kind") == ["crawl", "run", "batch", "search", "agent"]
     # A web search cannot be stopped: the API has no cancel for one.
-    assert enum("cancel_job", "kind") == ["crawl", "run", "batch"]
+    assert enum("cancel_job", "kind") == ["crawl", "run", "batch", "agent"]
     assert enum("list_pages", "mode") == ["content", "selector"]
     for tool in ("create_project", "update_project"):
         assert enum(tool, "schedule") == ["manual", "hourly", "daily", "weekly"]
