@@ -1,11 +1,12 @@
 """The client against a scripted transport: no network, no key."""
 
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
-from mesharc import Crawl, MeshArc, MeshArcError, __version__
+from mesharc import AgentRun, Crawl, MeshArc, MeshArcError, __version__
 
 
 def scripted(*responses):
@@ -139,3 +140,70 @@ def test_cancel_batch_deletes_the_scrape():
     arc = scripted((204, None))
     assert arc.cancel_batch("b1") is None
     assert (arc.calls[0].method, arc.calls[0].url.path) == ("DELETE", "/api/v1/scrape/b1")
+
+
+def test_an_agent_run_posts_its_body_with_the_key_and_is_polled_by_id():
+    arc = scripted((202, {"id": "a1", "kind": "agent", "status": "running", "data": None, "next": "/api/v1/agent/a1"}),
+                   {"id": "a1", "kind": "agent", "status": "done", "data": {"text": "MeshArc"},
+                    "sources": [{"url": "https://a.test/", "title": "A", "pageId": "p1"}], "next": None})
+    run = arc.agent("who makes it?", max_credits=100, allowed_domains=["a.test"], timeout_s=10,
+                    idempotency_key="agent-1")
+    assert run.status == "running"
+    assert run.wait(poll=0)["data"] == {"text": "MeshArc"}
+    assert run.sources[0]["pageId"] == "p1"
+    post, poll = arc.calls
+    assert (post.method, post.url.path) == ("POST", "/api/v1/agent")
+    assert post.headers["Idempotency-Key"] == "agent-1"
+    assert json.loads(post.content) == {"prompt": "who makes it?", "maxCredits": 100, "allowedDomains": ["a.test"],
+                                        "timeout": 10}
+    assert (poll.method, str(poll.url)) == ("GET", "https://api.mesharc.dev/api/v1/agent/a1")
+
+
+def test_an_expired_agent_run_is_a_410_error_and_ends_a_trace_quietly():
+    arc = scripted((410, {"error": "this run has expired", "code": "expired"}))
+    with pytest.raises(MeshArcError) as exc:
+        arc.get_agent("a1")
+    assert (exc.value.status, exc.value.code) == (410, "expired")
+    arc = scripted({"id": "a1", "status": "running"}, (410, {"error": "this run has expired", "code": "expired"}))
+    run = arc.get_agent("a1")
+    assert list(run.trace(poll=0)) == []
+    assert str(arc.calls[1].url) == "https://api.mesharc.dev/api/v1/agent/a1"
+
+
+def test_continuing_a_run_posts_json_and_a_409_is_raised_with_its_code():
+    arc = scripted((202, {"id": "a2", "status": "running", "continuesRunId": "a1"}),
+                   (409, {"error": "this run was already continued, by run a2", "code": "conflict", "request_id": "req_c"}))
+    first = AgentRun(arc._h, {"id": "a1", "status": "credit_limit"}).continue_(max_credits=500)
+    assert (first.id, first.continues_run_id) == ("a2", "a1")
+    post = arc.calls[0]
+    assert (post.method, post.url.path) == ("POST", "/api/v1/agent/a1/continue")
+    assert json.loads(post.content) == {"maxCredits": 500}
+    with pytest.raises(MeshArcError) as exc:
+        AgentRun(arc._h, {"id": "a1", "status": "credit_limit"}).continue_()
+    assert (exc.value.status, exc.value.code, exc.value.request_id) == (409, "conflict", "req_c")
+    assert len(arc.calls) == 2
+
+
+def test_the_monitors_namespace_sends_its_bodies_as_json_with_the_key():
+    arc = scripted((201, {"id": "m1", "kind": "search", "webhookSecret": "whsec_m"}),
+                   {"id": "m1"}, {"id": "m1", "webhook": None},
+                   (202, {"id": "r1", "status": "running"}))
+    assert arc.monitors.create("search", {"query": "mesh arc", "sources": ["news"]}, "hourly",
+                               idempotency_key="mon-1")["webhookSecret"] == "whsec_m"
+    arc.monitors.update("m1", name=None, schedule="daily", status=None, webhook=None)
+    arc.monitors.update("m1", webhook="")
+    arc.monitors.run("m1", idempotency_key="run-1")
+    create, update, remove, run = arc.calls
+    assert (create.method, create.url.path, create.headers["Idempotency-Key"]) == ("POST", "/api/v1/monitors", "mon-1")
+    assert json.loads(create.content) == {"kind": "search", "request": {"query": "mesh arc", "sources": ["news"]},
+                                          "schedule": "hourly"}
+    assert (update.method, update.url.path) == ("PATCH", "/api/v1/monitors/m1")
+    assert json.loads(update.content) == {"schedule": "daily"}, "a None is not sent as null"
+    assert json.loads(remove.content) == {"webhook": ""}, "the empty string is what removes the webhook"
+    assert (run.method, run.url.path, run.headers["Idempotency-Key"]) == ("POST", "/api/v1/monitors/m1/run", "run-1")
+
+
+def test_the_agent_list_puts_a_datetimes_zone_in_the_query_intact():
+    arc = scripted({"data": [], "next": None})
+    assert list(arc.agent_runs(since=datetime(2026, 10, 8, 9, 30, tzinfo=timezone.utc))) == []
+    assert arc.calls[0].url.params["since"] == "2026-10-08T09:30:00+00:00"
