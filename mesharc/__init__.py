@@ -85,6 +85,23 @@ def _iso(when: Union[str, date]) -> str:
     return when.isoformat() if isinstance(when, date) else when
 
 
+def _paged(http: Any, path: str, params: Dict[str, Any]) -> Iterator[Json]:
+    """Every row of a cursor-paged list: ``params`` on every request, and
+    the cursor from each page's ``next`` link until there is none."""
+    cursor = ""
+    while True:
+        page = http("GET", path, params={**params, **({"cursor": cursor} if cursor else {})})
+        for row in page.get("data") or []:
+            yield row
+        cursor = _cursor_of(page["next"]) if page.get("next") else ""
+        if not cursor:
+            return
+
+
+def _cancel_agent(http: Any, run_id: str) -> Json:
+    return http("DELETE", f"/agent/{run_id}")
+
+
 class _Http:
     """The transport: one httpx client, bearer auth, JSON errors, retries."""
 
@@ -329,17 +346,7 @@ class _Monitors:
         ``limit`` is the page size; follows the ``next`` link until the
         list ends.
         """
-        cursor = ""
-        while True:
-            params: Dict[str, Any] = {"limit": limit}
-            if cursor:
-                params["cursor"] = cursor
-            page = self._h("GET", f"/monitors/{monitor_id}/runs", params=params)
-            for row in page.get("data") or []:
-                yield row
-            cursor = _cursor_of(page["next"]) if page.get("next") else ""
-            if not cursor:
-                return
+        yield from _paged(self._h, f"/monitors/{monitor_id}/runs", {"limit": limit})
 
     def delete(self, monitor_id: str) -> Json:
         """The monitor and its runs. The searches and agent runs it made stay
@@ -511,16 +518,18 @@ class AgentRun:
         """Block until the run finishes. Returns the envelope.
 
         A run that is ``done``, ``cancelled`` or stopped at ``credit_limit``
-        (with what it had under ``data.partial``) is returned; ``error``
-        raises ``MeshArcError`` with the API's text.
+        (with what it had under ``data.partial``) is returned. Any other end
+        -- ``error``, or a status this client does not know -- raises
+        ``MeshArcError`` 502 ``job_failed`` with the API's text, as the Node
+        client does.
         """
         deadline = time.time() + timeout
         while True:
             status = self.refresh().status
-            if status == "error":
-                raise MeshArcError(502, self.envelope.get("error") or f"agent {status}", "job_failed")
-            if not _running(status):
+            if status in ("done", "cancelled", "credit_limit"):
                 return self.envelope
+            if not _running(status):
+                raise MeshArcError(502, self.envelope.get("error") or f"agent {status}", "job_failed")
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"agent {self.id} is still {status} after {timeout}s", self.id)
             time.sleep(poll)
@@ -531,7 +540,7 @@ class AgentRun:
         run is ``cancelled``, a running one ``cancelling`` (it stops before
         its next step), a finished one keeps its status. ``refresh()``
         reads where it ended."""
-        return self._h("DELETE", f"/agent/{self.id}")
+        return _cancel_agent(self._h, self.id)
 
     def continue_(self, max_credits: Optional[int] = None, max_steps: Optional[int] = None, timeout_s: float = 0,
                   idempotency_key: Optional[str] = None) -> AgentRun:
@@ -846,19 +855,7 @@ class MeshArc:
         again with ``q`` on every page. Follows the ``next`` link until the
         list ends.
         """
-        cursor = ""
-        while True:
-            params: Dict[str, Any] = {"limit": limit}
-            if q:
-                params["q"] = q
-            if cursor:
-                params["cursor"] = cursor
-            page = self._h("GET", "/search", params=params)
-            for row in page.get("data") or []:
-                yield row
-            cursor = _cursor_of(page["next"]) if page.get("next") else ""
-            if not cursor:
-                return
+        yield from _paged(self._h, "/search", {"limit": limit, **({"q": q} if q else {})})
 
     def agent(self, prompt: str, urls: Optional[Iterable[str]] = None, schema: Optional[Json] = None,
               max_credits: Optional[int] = None, max_steps: Optional[int] = None,
@@ -917,6 +914,14 @@ class MeshArc:
         """
         return AgentRun(self._h, self._h("GET", f"/agent/{run_id}"))
 
+    def cancel_agent(self, run_id: str) -> Json:
+        """Stop an agent run by its id, with no handle needed: what
+        ``AgentRun.cancel()`` does. Returns ``{id, status}``: ``cancelled``
+        for a queued run, ``cancelling`` for a running one (it stops before
+        its next step), a finished run's own status otherwise -- one past its
+        keep date included. Pages and model tokens it used stay charged."""
+        return _cancel_agent(self._h, run_id)
+
     def agent_runs(self, status: Optional[str] = None, limit: int = 25, model: Optional[str] = None,
                    since: Union[str, date, None] = None, until: Union[str, date, None] = None) -> Iterator[Json]:
         """Every agent run of the workspace, as summaries.
@@ -935,17 +940,7 @@ class MeshArc:
         filters: Dict[str, Any] = {k: v for k, v in (("status", status), ("model", model),
                                                      ("since", _iso(since) if since else None),
                                                      ("until", _iso(until) if until else None)) if v}
-        cursor = ""
-        while True:
-            params: Dict[str, Any] = {"limit": limit, **filters}
-            if cursor:
-                params["cursor"] = cursor
-            page = self._h("GET", "/agent", params=params)
-            for row in page.get("data") or []:
-                yield row
-            cursor = _cursor_of(page["next"]) if page.get("next") else ""
-            if not cursor:
-                return
+        yield from _paged(self._h, "/agent", {"limit": limit, **filters})
 
     def pages(self, project_id: str, run_id: Optional[str] = None) -> Json:
         """The pages of a run (the latest finished run by default)."""

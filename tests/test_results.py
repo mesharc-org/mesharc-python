@@ -649,6 +649,10 @@ class _Agents:
             raise self.raises
         return _AgentRun(self, self.now.pop(0))
 
+    def cancel_agent(self, id):
+        self.calls.append(("cancel_agent", id))
+        return self.cancel_answer
+
     def __enter__(self):
         return self
 
@@ -698,6 +702,24 @@ def test_run_agent_reads_the_run_after_starting_it_and_hands_back_a_job(monkeypa
     assert out["status"] == "running" and out["job"] == {"kind": "agent", "id": "a1"}
     assert out["budget"] == 2000 and out["creditsUsed"] == 40 and out["steps"] == 2
     assert "get_job" in out["note"] and "30 to 60 seconds" in out["note"]
+
+
+def test_run_agent_stays_on_the_sites_it_starts_from_unless_told_otherwise(monkeypatch):
+    """A page the agent reads could tell it to go elsewhere, so a run given
+    starting URLs is held to their sites by default -- as the app holds it.
+    allowed_domains given wins, [] included (no limit); no URLs, no limit."""
+    def sent(**kw):
+        arc = _Agents(posted=_agent_env("queued"), now=[_agent_env("running")])
+        monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
+        mcp_mod.run_agent("find it", **kw)
+        return arc.calls[0][3]["allowed_domains"]
+
+    urls = ["https://www.Shop.test/a", "https://shop.test/b", "http://docs.shop.test/", "https://other.test:8443/x"]
+    assert sent(urls=urls) == ["shop.test", "docs.shop.test", "other.test"], "hosts, lower case, without www, once"
+    assert sent(urls=urls, allowed_domains=["x.test"]) == ["x.test"]
+    assert sent(urls=urls, allowed_domains=[]) == [], "[] on purpose is no limit, and is sent as such"
+    assert sent() is None and sent(urls=[]) is None, "no starting URL: nothing to hold it to"
+    assert sent(urls=["not a url"]) is None
 
 
 def test_a_replayed_run_that_has_finished_answers_with_its_result(monkeypatch):
@@ -868,10 +890,11 @@ def test_a_huge_answer_with_field_sources_loses_them_and_then_the_rest(monkeypat
 
 def test_cancel_job_stops_an_agent_run_and_passes_on_the_apis_status(monkeypatch):
     for status in ("cancelling", "cancelled", "done"):
-        arc = _Agents(now=[_agent_env("running")], cancel_answer={"id": "a1", "status": status})
+        arc = _Agents(cancel_answer={"id": "a1", "status": status})
         monkeypatch.setattr(mcp_mod, "_client", lambda arc=arc: arc)
         out = mcp_mod.cancel_job("agent", "a1")
-        assert arc.calls == [("get_agent", "a1"), ("cancel", "a1")]
+        # One request: the run is stopped by its id, not read first.
+        assert arc.calls == [("cancel_agent", "a1")]
         assert out["kind"] == "agent" and out["id"] == "a1" and out["outcome"] == status
         assert "stay charged" in out["note"] and "next step" in out["note"]
 

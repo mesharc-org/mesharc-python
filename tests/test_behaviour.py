@@ -279,6 +279,23 @@ def test_an_agent_run_still_running_at_the_deadline_raises_a_timeout_naming_it()
     assert "agent a9 is still running" in str(exc.value)
 
 
+@pytest.mark.parametrize("status", ["expired", "something_new"])
+def test_an_agent_run_that_ends_any_other_way_raises_rather_than_passing_as_an_answer(status):
+    """Only done, cancelled and credit_limit are answers; anything else that is
+    not running -- an expired run, a status this client does not know -- is a
+    failure, as the Node client has it."""
+    http = FakeHttp([{"id": "a1", "status": status}])
+    with pytest.raises(MeshArcError) as exc:
+        AgentRun(http, {"id": "a1", "status": "running"}).wait(poll=0)
+    assert (exc.value.status, exc.value.code, exc.value.detail) == (502, "job_failed", f"agent {status}")
+
+
+def test_an_agent_run_is_cancelled_by_its_id_without_reading_it_first():
+    arc, http = client([{"id": "a1", "status": "cancelling"}])
+    assert arc.cancel_agent("a1") == {"id": "a1", "status": "cancelling"}
+    assert http.calls == [("DELETE", "/agent/a1", {}, {}, None)]
+
+
 def test_cancelling_an_agent_run_returns_the_apis_answer_and_leaves_the_envelope():
     http = FakeHttp([{"id": "a1", "status": "cancelling"}])
     run = AgentRun(http, {"id": "a1", "status": "running"})

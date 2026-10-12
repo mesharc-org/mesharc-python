@@ -1243,6 +1243,19 @@ AGENT_CANCEL_NOTE = ("a queued run stops at once; a running one stops before its
                      "finishing first. Pages and model tokens already used stay charged.")
 
 
+def _start_sites(urls):
+    """The sites of the URLs an agent starts from, as allowed_domains takes
+    them: each host, lower case, without www (the API keeps its subdomains)."""
+    from urllib.parse import urlparse
+    sites = []
+    for url in urls or []:
+        host = (urlparse(url).hostname or "").lower()
+        host = host[4:] if host.startswith("www.") else host
+        if host and host not in sites:
+            sites.append(host)
+    return sites
+
+
 def _key_in_flight(exc):
     """A 409 saying the first request with this idempotency key is still being
     accepted: code in_flight, or only the message on an API from before that
@@ -1355,7 +1368,9 @@ def _agent_result(env):
                   "Inputs: prompt says what to find, e.g. 'the monthly price of each plan on example.com'. urls "
                   "gives pages to start from, e.g. ['https://example.com/pricing']. schema shapes the answer, e.g. "
                   "{\"type\": \"object\", \"properties\": {\"plans\": {\"type\": \"array\"}}}; without one the "
-                  "answer is {\"text\": ...}. allowed_domains=['example.com'] keeps it to those sites.\n"
+                  "answer is {\"text\": ...}. allowed_domains=['example.com'] keeps it to those sites; with urls "
+                  "and no allowed_domains it stays on the sites of urls, as a page could tell it to go elsewhere, "
+                  "and allowed_domains=[] lets it read any site.\n"
                   "Cost: pages are charged as they are read, and a page the site refuses is free; the model's "
                   "tokens at the model provider's price plus 20%. max_credits caps the whole run, 2,000 by "
                   "default; a run that reaches it stops with what it found, and continue_agent carries it on.\n"
@@ -1373,8 +1388,9 @@ def run_agent(prompt: Annotated[str, Field(
                   description="A JSON Schema object whose type is object or array; the answer then matches "
                               "it. Omit for a text answer, {\"text\": ...}.")] = None,
               allowed_domains: Annotated[list[str] | None, Field(
-                  description="Up to 20 sites the agent stays within, e.g. ['example.com']; omit for the "
-                              "whole web.")] = None,
+                  description="Up to 20 sites the agent stays within, e.g. ['example.com']. Omitted, it stays "
+                              "on the sites of urls (or reads any site when there are none); [] lets it read "
+                              "any site.")] = None,
               max_credits: Annotated[int | None, Field(
                   description="The most the run may spend, 1 to 100,000 credits; omit for 2,000.")] = None,
               max_steps: Annotated[int | None, Field(
@@ -1384,10 +1400,14 @@ def run_agent(prompt: Annotated[str, Field(
         # on the same run, and a deliberate re-run later is a new one.
         key = _key("agent", prompt, urls, schema, allowed_domains, max_credits, max_steps,
                    int(time.time() // 600))
+        # Held to where it starts unless told otherwise: an agent reads pages
+        # it did not choose, and one of them could send it elsewhere. The app
+        # does the same; [] given on purpose is no limit.
+        domains = allowed_domains if allowed_domains is not None else (_start_sites(urls) or None)
         with _client() as s:
             try:
                 run = s.agent(prompt, urls=urls, schema=schema, max_credits=max_credits, max_steps=max_steps,
-                              allowed_domains=allowed_domains, idempotency_key=key)
+                              allowed_domains=domains, idempotency_key=key)
             except MeshArcError as exc:
                 # The first request with this key is still being accepted, and
                 # this answer carries no run id: asking again shortly gets it.
@@ -2051,7 +2071,7 @@ def cancel_job(kind: JobKind, id: JobId, project_id: JobProject = None) -> Cance
         if kind == "agent":
             # The API says what it did: cancelled (queued), cancelling (the
             # step under way finishes first), or a finished run's status.
-            answer = s.get_agent(id).cancel() or {}
+            answer = s.cancel_agent(id) or {}
             return {"kind": "agent", "id": id, "outcome": answer.get("status"), "note": AGENT_CANCEL_NOTE}
         return {"error": f"kind must be crawl, run, batch or agent, not {kind!r}", "code": "validation"}
     return _safe(go)
