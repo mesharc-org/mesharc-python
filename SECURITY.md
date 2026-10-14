@@ -4,8 +4,10 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x    | yes       |
+| 0.6.x   | yes       |
 | older   | no — upgrade |
+
+Only the latest release gets security fixes. This table moves with each minor release.
 
 ## Reporting a vulnerability
 
