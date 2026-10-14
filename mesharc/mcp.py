@@ -88,6 +88,8 @@ INSTRUCTIONS = (
     "list_pages with q searches only inside a project's run. "
     "run_agent hands a research question to an agent that searches and reads pages on its own, "
     "returning a job for get_job; continue_agent carries on a run that stopped at its credit limit. "
+    "create_monitor keeps a web search or an agent question and runs it again on a schedule, reporting what "
+    "changed; list_monitors, pause_monitor and get_monitor_rows follow and manage them. "
     "A long tool may hand back a job: get_job follows it and cancel_job stops it. "
     "Blocked pages are reported as blocked, never as missing."
 )
@@ -98,7 +100,7 @@ INSTRUCTIONS = (
 # on a second server later, built with auth in its constructor. The registry is
 # what carries the descriptions across: a description is the only thing an
 # assistant has to pick a tool by, and re-registering without them would leave
-# seventeen nameless verbs.
+# twenty-one nameless verbs.
 _TOOLS: "list[tuple]" = []
 
 # What each tool does to the world, in the hints MCP clients read. A tool that
@@ -475,6 +477,60 @@ class AgentOut(TypedDict, total=False):
     note: Annotated[Any, Field(description="What to do next, and what was cut and where to get it whole.")]
     error: Annotated[Any, Field(description=(
         "When the call failed, or the run ended in error: what went wrong, in words an assistant can act on."))]
+    code: Annotated[Any, Field(description=_CODE)]
+    detail: Annotated[Any, Field(description=_DETAIL)]
+
+
+@with_config(ConfigDict(extra="allow"))
+class MonitorOut(TypedDict, total=False):
+    """One monitor: a search or an agent question kept on a schedule, and its latest runs."""
+    id: Annotated[Any, Field(description="The monitor's id, for list_monitors, pause_monitor and get_monitor_rows.")]
+    kind: Annotated[Any, Field(description="'search' or 'agent'.")]
+    name: Annotated[Any, Field(description="Its name; the query or the prompt unless one was given.")]
+    schedule: Annotated[Any, Field(description="'hourly', 'daily' or 'weekly'.")]
+    status: Annotated[Any, Field(description="'active' or 'paused'. On an error, the HTTP status code.")]
+    request: Annotated[Any, Field(description="The search or agent request it runs, in the API's names.")]
+    budget: Annotated[Any, Field(description="{perRun, perMonth} in credits; 0 is no cap.")]
+    spentThisMonth: Annotated[Any, Field(description="What its runs cost this calendar month (UTC), in credits.")]
+    nextRunAt: Annotated[Any, Field(description="When it runs next, ISO 8601; null while paused.")]
+    lastRun: Annotated[Any, Field(description=(
+        "Its latest run: {status, changed, summary, credits, refId}; refId is the search or agent run it made."))]
+    rows: Annotated[Any, Field(description="When it follows its answer as records: {path, key, confirmAfter}.")]
+    note: Annotated[Any, Field(description="What happens next, or what was left out.")]
+    error: Annotated[Any, Field(description=_ERR)]
+    code: Annotated[Any, Field(description=_CODE)]
+    detail: Annotated[Any, Field(description=_DETAIL)]
+
+
+@with_config(ConfigDict(extra="allow"))
+class MonitorsOut(TypedDict, total=False):
+    """The workspace's monitors."""
+    monitors: Annotated[Any, Field(description=(
+        "Each {id, kind, name, schedule, status, nextRunAt, lastRunAt, spentThisMonth, budget, lastRun: {status, "
+        "changed, summary}}, newest first. Absent with monitor_id."))]
+    monitor: Annotated[Any, Field(description=(
+        "With monitor_id only: the monitor in full -- its request, budget and records setting -- and under `runs` "
+        "its latest runs, newest first, each {id, status, trigger, changed, summary, credits, refId, createdAt}."))]
+    error: Annotated[Any, Field(description=_ERR)]
+    status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
+    code: Annotated[Any, Field(description=_CODE)]
+    detail: Annotated[Any, Field(description=_DETAIL)]
+
+
+@with_config(ConfigDict(extra="allow"))
+class MonitorRowsOut(TypedDict, total=False):
+    """The records an agent monitor follows, and what moved among them."""
+    monitor_id: Annotated[Any, Field(description="The monitor read.")]
+    rows: Annotated[Any, Field(description=(
+        "The records as they stand, each {key, attrs (its columns), sources (the page each was read on), url, "
+        "active, withheld, firstSeen, lastSeen}, at most `limit`."))]
+    total: Annotated[Any, Field(description="How many records match, whatever `limit` returned.")]
+    events: Annotated[Any, Field(description=(
+        "With changes=true: what moved, newest first -- records added, a column changed (before and after), "
+        "records gone or withheld -- at most 50."))]
+    note: Annotated[Any, Field(description="What was left out and how to get it.")]
+    error: Annotated[Any, Field(description=_ERR)]
+    status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
 
@@ -894,7 +950,7 @@ def _scopes():
     return list(getattr(at, "scopes", None) or []) if at else []
 
 
-# Eleven of the seventeen tools need write, including every one that fetches a
+# Thirteen of the twenty-one tools need write, including every one that fetches a
 # page: fetching spends the workspace's credits, so it is not a read however
 # it reads to an assistant asking for one URL. The API answers "this needs the
 # member role", which is true and tells an assistant nothing it can act on --
@@ -1486,6 +1542,191 @@ def continue_agent(id: Annotated[str, Field(
     return _safe(go)
 
 
+MonitorId = Annotated[str, Field(description="The monitor's id, from list_monitors or create_monitor.")]
+# What get_monitor_rows hands back at most: records past it are counted, not shown.
+ROWS_CHARS = 60_000
+ROWS_MAX = 500
+
+
+def _monitor_row(m):
+    """A monitor as list_monitors shows it: what picks one, not its request."""
+    last = m.get("lastRun") or {}
+    return {**{k: m.get(k) for k in ("id", "kind", "name", "schedule", "status", "nextRunAt", "lastRunAt",
+                                      "spentThisMonth", "budget")},
+            "lastRun": {k: last.get(k) for k in ("status", "changed", "summary")} if last else None}
+
+
+def _monitor_run(r):
+    return {k: r.get(k) for k in ("id", "status", "trigger", "changed", "summary", "credits", "refId", "createdAt",
+                                  "error") if r.get(k) not in (None, "")}
+
+
+@tool(title="Keep a search or question on a schedule",
+      annotations=_acts(),
+      description="Keep a web search or an agent question and run it again on a schedule, each run compared with "
+                  "the last one that answered: new, dropped and moved results for a search, the answer's added, "
+                  "changed and removed values for a question.\n"
+                  "Use it when the person asks to keep watching, monitoring or tracking something on the web -- a "
+                  "brand's mentions, a ranking, a competitor's prices. To watch a whole site's pages use "
+                  "create_project; to ask once use search_web or run_agent.\n"
+                  "Inputs: kind 'search' with query (news=true for news results), or kind 'agent' with prompt and "
+                  "optional urls, schema and allowed_domains (omitted, it stays on the sites of urls, as run_agent "
+                  "does). schedule is hourly, daily or weekly. follow_rows=true follows a list answer record by "
+                  "record (read with get_monitor_rows).\n"
+                  "Cost: each run is charged as the search or agent run it is -- a results page 1 to 4 credits, "
+                  "an agent run up to max_credits -- and the first run starts now. max_credits_per_month skips "
+                  "runs once the month has spent that much.\n"
+                  "Effect: it answers with the monitor; list_monitors shows its runs. pause_monitor stops it.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'.")
+def create_monitor(kind: Annotated[Literal["search", "agent"], Field(
+                       description="'search' keeps a web search; 'agent' keeps a research question.")],
+                   schedule: Annotated[Literal["hourly", "daily", "weekly"], Field(
+                       description="How often it runs again.")],
+                   query: Annotated[str | None, Field(
+                       description="kind 'search' only: what to search for, as typed into a search engine.")] = None,
+                   news: Annotated[bool, Field(
+                       description="kind 'search' only: true searches news results; default false.")] = False,
+                   prompt: Annotated[str | None, Field(
+                       description="kind 'agent' only: the question, 1 to 10,000 characters.")] = None,
+                   urls: Annotated[list[str] | None, Field(
+                       description="kind 'agent' only: up to 20 absolute URLs it starts from.")] = None,
+                   allowed_domains: Annotated[list[str] | None, Field(
+                       description="kind 'agent' only: sites it stays within; omitted, the sites of urls; [] any "
+                                   "site.")] = None,
+                   schema: Annotated[dict | None, Field(
+                       description="kind 'agent' only: a JSON Schema (type object or array) for the answer.")] = None,
+                   max_credits: Annotated[int | None, Field(
+                       description="kind 'agent' only: the most one run may spend, 1 to 100,000; omit for "
+                                   "2,000.")] = None,
+                   follow_rows: Annotated[bool, Field(
+                       description="kind 'agent' only: true follows a list answer record by record; default "
+                                   "false.")] = False,
+                   max_credits_per_month: Annotated[int | None, Field(
+                       description="The most its runs may spend in a calendar month, in credits; omit or 0 for "
+                                   "no cap.", ge=0)] = None,
+                   name: Annotated[str | None, Field(
+                       description="A display name; omit for the query or the prompt.")] = None) -> MonitorOut:
+    def go():
+        if kind == "search":
+            if not (query or "").strip() or prompt or follow_rows:
+                return {"error": "a search monitor takes query, not prompt or follow_rows", "code": "validation"}
+            request: dict = {"query": query}
+            if news:
+                request["sources"] = ["news"]
+        else:
+            if not (prompt or "").strip() or query:
+                return {"error": "an agent monitor takes prompt, not query", "code": "validation"}
+            domains = allowed_domains if allowed_domains is not None else (_start_sites(urls) or None)
+            request = {"prompt": prompt, **{k: v for k, v in (("urls", urls), ("allowedDomains", domains),
+                                                               ("schema", schema), ("maxCredits", max_credits))
+                                             if v is not None}}
+        budget = {"perMonth": max_credits_per_month} if max_credits_per_month else None
+        # A retry in the same ten minutes lands on the same monitor.
+        key = _key("monitor", kind, schedule, request, follow_rows, max_credits_per_month, name,
+                   int(time.time() // 600))
+        with _client() as s:
+            m = s.monitors.create(kind, request, schedule, name=name, budget=budget, rows=True if follow_rows else None,
+                                  idempotency_key=key)
+        out = dict(m)
+        out["note"] = (f"its first run has started; it runs {schedule} from then. list_monitors with monitor_id shows "
+                       f"its runs and what changed; pause_monitor stops it")
+        return out
+    return _safe(go)
+
+
+@tool(title="List monitors and their runs",
+      annotations=READS_STORED,
+      description="List the workspace's monitors -- searches and agent questions kept on a schedule -- each with "
+                  "its schedule, status, next run, this month's spend and what its last run found; or, with "
+                  "monitor_id, one monitor with its latest runs.\n"
+                  "Call it to find a monitor_id, to see whether a kept search or question found something new, or "
+                  "to check spend. A run's refId is the search or agent run it made: get_job(kind='search' or "
+                  "'agent', id=refId) reads it in full.\n"
+                  "Inputs: kind keeps 'search' or 'agent' ones; monitor_id reads one, with up to `runs` of its "
+                  "runs (10 by default).\n"
+                  "Read-only and free: it reads stored data and never fetches.")
+def list_monitors(kind: Annotated[Literal["search", "agent"] | None, Field(
+                      description="Keep only 'search' or 'agent' monitors; omit for both.")] = None,
+                  monitor_id: Annotated[str | None, Field(
+                      description="One monitor's id, to read it with its latest runs.")] = None,
+                  runs: Annotated[int, Field(
+                      description="With monitor_id: how many of its latest runs, 1 to 50; default 10.")] = 10
+                  ) -> MonitorsOut:
+    def go():
+        with _client() as s:
+            if monitor_id:
+                m = dict(s.monitors.get(monitor_id))
+                want = max(1, min(int(runs or 10), 50))
+                got = []
+                for r in s.monitors.runs(monitor_id, limit=want):
+                    got.append(_monitor_run(r))
+                    if len(got) >= want:
+                        break
+                m["runs"] = got
+                return {"monitor": m}
+            return {"monitors": [_monitor_row(m) for m in s.monitors.list(kind=kind)]}
+    return _safe(go)
+
+
+@tool(title="Pause or resume a monitor",
+      annotations=_acts(idempotent=True, open_world=False),
+      description="Pause a monitor so it makes no more scheduled runs, or resume it.\n"
+                  "Use it when the person wants a kept search or question to stop for now, or to start again. "
+                  "A paused monitor keeps its runs and records; nothing is deleted.\n"
+                  "Inputs: monitor_id from list_monitors. resume=true starts it again: a slot that passed while it "
+                  "was paused runs once, at the next tick.\n"
+                  "Effect: it answers with the monitor. A run under way finishes. Nothing is fetched and no "
+                  "credits are spent by pausing.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'.")
+def pause_monitor(monitor_id: MonitorId,
+                  resume: Annotated[bool, Field(
+                      description="true resumes a paused monitor; default false pauses it.")] = False) -> MonitorOut:
+    def go():
+        with _client() as s:
+            return s.monitors.resume(monitor_id) if resume else s.monitors.pause(monitor_id)
+    return _safe(go)
+
+
+@tool(title="Read a monitor's records",
+      annotations=READS_STORED,
+      description="Read the records an agent monitor follows -- one per item its answer lists, e.g. each plan of "
+                  "a pricing page -- as they stand, with the page each value was read on; and, with changes=true, "
+                  "what moved: records added, a column changed (before and after), records gone.\n"
+                  "Use it for a monitor made with follow_rows=true, to answer what changed or what the list is "
+                  "now. list_monitors shows a run's summary; this is the record-level detail.\n"
+                  "Inputs: monitor_id from list_monitors. active=false lists the records gone instead. q keeps "
+                  "records holding it. limit is 1 to 500 (100 by default).\n"
+                  "Read-only and free: it reads stored data and never fetches.")
+def get_monitor_rows(monitor_id: MonitorId,
+                     active: Annotated[bool, Field(
+                         description="true (default) lists the records as they stand; false the records "
+                                     "gone.")] = True,
+                     q: Annotated[str | None, Field(description="Keep records holding this text.")] = None,
+                     limit: Annotated[int, Field(description="The most records to return, 1 to 500.")] = 100,
+                     changes: Annotated[bool, Field(
+                         description="true also returns what moved, newest first, at most 50.")] = False
+                     ) -> MonitorRowsOut:
+    def go():
+        want = max(1, min(int(limit or 100), ROWS_MAX))
+        with _client() as s:
+            page = s.monitors.rows_page(monitor_id, active=active, q=q, limit=want)
+            rows, size = [], 0
+            for r in page.get("data") or []:
+                # Kept within what an answer may carry; the rest are counted.
+                size += len(json.dumps(r, default=str))
+                if rows and size > ROWS_CHARS:
+                    break
+                rows.append(r)
+            out: dict = {"monitor_id": monitor_id, "rows": rows, "total": page.get("total", len(rows))}
+            if out["total"] > len(rows):
+                out["note"] = (f"{len(rows)} of {out['total']} records shown; ask with q to narrow, or export them "
+                               f"from the monitor's page in the MeshArc app")
+            if changes:
+                out["events"] = s.monitors.row_events(monitor_id, limit=50)
+            return out
+    return _safe(go)
+
+
 @tool(title="List all projects",
       annotations=READS_STORED,
       description="List every project in the workspace, the sites it watches over time, each with its id, name, "
@@ -1642,6 +1883,9 @@ def get_project(project_id: Annotated[str | None, Field(
                   "all.\n"
                   "Cost: creating reads robots.txt and the sitemaps but no pages, so it is free. Each run spends "
                   "credits per page, and any schedule but 'manual' runs on its own.\n"
+                  "Caps: max_credits_per_run stops a run at that many credits, keeping what it read; "
+                  "max_credits_per_month skips scheduled runs once the month has spent that many. 0 or omitted is "
+                  "no cap.\n"
                   "Refusals: an unknown config key, or a plan already at its project limit (code plan_limit). "
                   "Values above the plan's caps are lowered to them.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
@@ -1658,18 +1902,28 @@ def create_project(seed: Annotated[str | None, Field(
                                    "start_run is called.")] = "manual",
                    config: Annotated[dict | None, Field(
                        description="Settings as {key: value}, with a seed only; omit for the defaults.")]
-                   = None) -> ProjectOut:
+                   = None,
+                   max_credits_per_run: Annotated[int | None, Field(
+                       description="The most one run may spend, in credits; omit or 0 for no cap.", ge=0)] = None,
+                   max_credits_per_month: Annotated[int | None, Field(
+                       description="The most its runs may spend in a calendar month, in credits; omit or 0 for no "
+                                   "cap.", ge=0)] = None) -> ProjectOut:
     def go():
         if bool(seed) == bool(crawl_id):
             return {"error": "give either seed (a new project) or crawl_id (keep a crawl), not both or neither",
                     "code": "validation"}
+        caps = {k: v for k, v in (("max_credits_per_run", max_credits_per_run),
+                                  ("max_credits_per_month", max_credits_per_month)) if v is not None}
         with _client() as s:
             if crawl_id:
                 if config:
                     return {"error": "a kept crawl keeps the settings it was crawled with; create the project "
                                      "without config, then change them with update_project", "code": "validation"}
-                return s.get_crawl(crawl_id).keep(name=name, schedule=schedule)
-            return s.projects.create(seed, name=name, schedule=schedule, config=config)
+                kept = s.get_crawl(crawl_id).keep(name=name, schedule=schedule)
+                # The caps are budget, not how the crawl read: set on the
+                # project it became, which changes nothing it stored.
+                return s.projects.update(kept["id"], config=caps) if caps and kept.get("id") else kept
+            return s.projects.create(seed, name=name, schedule=schedule, config={**(config or {}), **caps} or None)
     return _safe(go)
 
 
