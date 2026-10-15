@@ -48,6 +48,7 @@ def test_a_follow_up_posts_its_own_request_to_the_runs_conversation():
     assert (req.method, req.url.path, req.headers["Idempotency-Key"]) == ("POST", "/api/v1/agent/r1/follow-up", "f-1")
     assert body(req) == {"prompt": "and their prices?", "maxCredits": 300, "dataConnections": ["c1"], "timeout": 120}
     assert (nxt.id, nxt.envelope["followsRunId"]) == ("r2", "r1")
+    assert (nxt.follows_run_id, nxt.followed_by, first.follows_run_id) == ("r1", None, None)
 
 
 def test_a_follow_up_of_a_message_that_is_not_the_latest_is_a_409():
@@ -94,6 +95,10 @@ def test_waiting_for_a_table_polls_until_it_ends_and_times_out_plainly(monkeypat
     monkeypatch.setattr("time.sleep", lambda s: None)
     arc = scripted({"id": "b1", "status": "running"}, {"id": "b1", "status": "done"})
     assert arc.agent_batches.wait("b1", poll=0)["status"] == "done"
+    # A table being cancelled still has rows stopping: it is waited for until it has ended.
+    arc = scripted({"id": "b1", "status": "cancelling"}, {"id": "b1", "status": "cancelled"})
+    assert arc.agent_batches.wait("b1", poll=0)["status"] == "cancelled"
+    assert len(arc.calls) == 2
     arc = scripted({"id": "b1", "status": "running"})
     with pytest.raises(MeshArcTimeoutError) as exc:
         arc.agent_batches.wait("b1", poll=0, timeout=0)

@@ -27,7 +27,7 @@ import os
 import random
 import time
 from datetime import date
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Union
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -74,7 +74,8 @@ class MeshArcTimeoutError(MeshArcError, TimeoutError):
 
 
 def _running(status: Any) -> bool:
-    return status in ("queued", "running")
+    # "cancelling" is a table whose rows are still stopping: not finished yet.
+    return status in ("queued", "running", "cancelling")
 
 
 def _cursor_of(next_url: str) -> str:
@@ -329,7 +330,7 @@ class _Monitors:
                webhook: Union[str, Json, None] = None, baseline_id: Optional[str] = None,
                idempotency_key: Optional[str] = None, budget: Optional[Json] = None, alerts: Optional[Json] = None,
                add_to_project: Optional[str] = None, rows: Union[bool, Json, None] = None,
-               destination: Optional[str] = None, sentiment: Union[bool, Json, None] = None) -> Json:
+               destination: Optional[str] = None, sentiment: Union[Literal[False], Json, None] = None) -> Json:
         """Keep a search or an agent request and run it on a schedule.
 
         ``kind`` is ``search`` or ``agent``; ``request`` is the body of a
@@ -387,7 +388,7 @@ class _Monitors:
                status: Optional[str] = None, webhook: Union[str, Json, None] = None,
                budget: Optional[Json] = None, alerts: Optional[Json] = None, add_to_project: Optional[str] = None,
                rows: Union[bool, Json, None] = None, destination: Optional[str] = None,
-               sentiment: Union[bool, Json, None] = None) -> Json:
+               sentiment: Union[Literal[False], Json, None] = None) -> Json:
         """Change a monitor's ``name``, ``schedule``, ``status`` (``active`` or
         ``paused``), ``webhook`` or any setting ``create`` takes. Only the
         ones that are not None are sent; ``webhook=""`` removes the webhook,
@@ -943,6 +944,16 @@ class AgentRun:
     def continued_by(self) -> Optional[str]:
         """The run that carried this one on: its answer replaces this one's partial."""
         return self.envelope.get("continuedBy") or None
+
+    @property
+    def follows_run_id(self) -> Optional[str]:
+        """The message this one follows in its conversation (``follow_up()``); None for its first."""
+        return self.envelope.get("followsRunId") or None
+
+    @property
+    def followed_by(self) -> Optional[str]:
+        """The follow-up asked after this message; None until one is."""
+        return self.envelope.get("followedBy") or None
 
     def refresh(self) -> AgentRun:
         """Read the run as it stands now. Returns the handle."""
