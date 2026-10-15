@@ -112,11 +112,11 @@ def _some(**fields: Any) -> Json:
 def _agent_body(prompt: str, urls: Optional[Iterable[str]], schema: Optional[Json], max_credits: Optional[int],
                 max_steps: Optional[int], allowed_domains: Optional[Iterable[str]], webhook: Union[str, Json, None],
                 connection_id: Optional[str], login_id: Optional[str], data_connections: Optional[Iterable[str]],
-                proposals: Optional[bool], timeout_s: float) -> Json:
+                proposals: Optional[bool], timeout_s: float, logins: Union[str, Iterable[str], None] = None) -> Json:
     """A POST /agent body (and a follow-up's) in the API's own names, naming only what was given."""
     body: Json = {"prompt": prompt}
     body.update(_some(schema=schema, maxCredits=max_credits, maxSteps=max_steps, webhook=webhook,
-                      connectionId=connection_id, loginId=login_id, proposals=proposals))
+                      connectionId=connection_id, loginId=login_id, proposals=proposals, logins=_logins(logins)))
     if urls is not None:
         body["urls"] = list(urls)
     if allowed_domains is not None:
@@ -126,6 +126,11 @@ def _agent_body(prompt: str, urls: Optional[Iterable[str]], schema: Optional[Jso
     if timeout_s > 0:
         body["timeout"] = min(timeout_s, 120)
     return body
+
+
+def _logins(logins: Union[str, Iterable[str], None]) -> Union[str, List[str], None]:
+    """``logins`` as the API takes it: "auto", "none", or a list of login ids."""
+    return logins if logins is None or isinstance(logins, str) else list(logins)
 
 
 def _offset_rows(http: Any, path: str, params: Dict[str, Any], limit: int) -> Iterator[Json]:
@@ -490,11 +495,11 @@ class _AgentBatches:
               urls: Optional[Iterable[str]], schema: Optional[Json], max_steps: Optional[int],
               allowed_domains: Optional[Iterable[str]], concurrency: Optional[int], name: Optional[str],
               connection_id: Optional[str], login_id: Optional[str],
-              data_connections: Optional[Iterable[str]]) -> Json:
+              data_connections: Optional[Iterable[str]], logins: Union[str, Iterable[str], None] = None) -> Json:
         body: Json = {"prompt": prompt}
         body.update(_some(csv=csv, rows=rows, maxCreditsPerRow=max_credits_per_row, schema=schema,
                           maxSteps=max_steps, concurrency=concurrency, name=name, connectionId=connection_id,
-                          loginId=login_id))
+                          loginId=login_id, logins=_logins(logins)))
         if urls is not None:
             body["urls"] = list(urls)
         if allowed_domains is not None:
@@ -508,14 +513,14 @@ class _AgentBatches:
                 schema: Optional[Json] = None, max_steps: Optional[int] = None,
                 allowed_domains: Optional[Iterable[str]] = None, concurrency: Optional[int] = None,
                 name: Optional[str] = None, connection_id: Optional[str] = None, login_id: Optional[str] = None,
-                data_connections: Optional[Iterable[str]] = None) -> Json:
+                data_connections: Optional[Iterable[str]] = None, logins: Union[str, Iterable[str], None] = None) -> Json:
         """What ``start`` would do, without starting it or spending anything:
         the rows that can run and those that cannot (and why), the first
         prompts as their rows will ask them, and an estimate against the
         balance."""
         return self._h("POST", "/agent/batch/preview", json=self._body(
             prompt, csv, rows, max_credits_per_row, urls, schema, max_steps, allowed_domains, concurrency, name,
-            connection_id, login_id, data_connections))
+            connection_id, login_id, data_connections, logins))
 
     def start(self, prompt: str, csv: Optional[str] = None, rows: Optional[List[Json]] = None,
               max_credits_per_row: Optional[int] = None, urls: Optional[Iterable[str]] = None,
@@ -523,7 +528,7 @@ class _AgentBatches:
               allowed_domains: Optional[Iterable[str]] = None, concurrency: Optional[int] = None,
               name: Optional[str] = None, connection_id: Optional[str] = None, login_id: Optional[str] = None,
               data_connections: Optional[Iterable[str]] = None, webhook: Union[str, Json, None] = None,
-              idempotency_key: Optional[str] = None) -> Json:
+              idempotency_key: Optional[str] = None, logins: Union[str, Iterable[str], None] = None) -> Json:
         """Start one agent run a row of the table.
 
         The table is ``csv`` (its first line names the columns) or ``rows``,
@@ -532,15 +537,15 @@ class _AgentBatches:
         columns. ``max_credits_per_row`` is required by the API. Without
         ``allowed_domains`` each row is held to its own URLs' sites; ``[]``
         lifts the limit. ``concurrency`` rows run at once (3 by default).
-        ``login_id`` and ``data_connections`` are as ``agent()`` takes them,
-        for every row. ``webhook`` is told ``agent.batch.finished`` once; its
+        ``logins``, ``login_id`` and ``data_connections`` are as ``agent()``
+        takes them, for every row. ``webhook`` is told ``agent.batch.finished`` once; its
         secret comes back once, as ``webhookSecret``.
 
         Spends credits and needs a key that can write. Returns the batch,
         with ``counts`` by row status; ``wait()`` waits for it.
         """
         body = self._body(prompt, csv, rows, max_credits_per_row, urls, schema, max_steps, allowed_domains,
-                          concurrency, name, connection_id, login_id, data_connections)
+                          concurrency, name, connection_id, login_id, data_connections, logins)
         if webhook is not None:
             body["webhook"] = webhook
         return self._h("POST", "/agent/batch", json=body, idempotency_key=idempotency_key)
@@ -1010,7 +1015,8 @@ class AgentRun:
                   allowed_domains: Optional[Iterable[str]] = None, webhook: Union[str, Json, None] = None,
                   connection_id: Optional[str] = None, login_id: Optional[str] = None,
                   data_connections: Optional[Iterable[str]] = None, proposals: Optional[bool] = None,
-                  timeout_s: float = 0, idempotency_key: Optional[str] = None) -> AgentRun:
+                  timeout_s: float = 0, idempotency_key: Optional[str] = None,
+                  logins: Union[str, Iterable[str], None] = None) -> AgentRun:
         """Ask a follow-up in this run's conversation; returns its ``AgentRun``.
 
         It answers after everything asked and found in the conversation
@@ -1022,7 +1028,7 @@ class AgentRun:
         keep date.
         """
         body = _agent_body(prompt, urls, schema, max_credits, max_steps, allowed_domains, webhook, connection_id,
-                           login_id, data_connections, proposals, timeout_s)
+                           login_id, data_connections, proposals, timeout_s, logins)
         return AgentRun(self._h, self._h("POST", f"/agent/{self.id}/follow-up", json=body,
                                          idempotency_key=idempotency_key))
 
@@ -1334,7 +1340,8 @@ class MeshArc:
               allowed_domains: Optional[Iterable[str]] = None, webhook: Union[str, Json, None] = None,
               connection_id: Optional[str] = None, timeout_s: float = 0,
               idempotency_key: Optional[str] = None, login_id: Optional[str] = None,
-              data_connections: Optional[Iterable[str]] = None, proposals: Optional[bool] = None) -> AgentRun:
+              data_connections: Optional[Iterable[str]] = None, proposals: Optional[bool] = None,
+              logins: Union[str, Iterable[str], None] = None) -> AgentRun:
         """Hand a question to the agent: it searches, reads pages and answers.
 
         Needs an API key that can write, and spends credits: pages as they
@@ -1355,8 +1362,12 @@ class MeshArc:
         secret its messages are signed with comes back once, as
         ``AgentRun.webhook_secret``.
 
-        ``login_id`` is one of the workspace's saved logins: pages on its
-        site are read signed in, every other site signed out.
+        The workspace's saved logins need no picking: each page on a site
+        with one is read signed in with that site's login, every other page
+        signed out, so one run can read several sites signed in. ``logins``
+        changes that -- ``"none"``, or a list of login ids to keep it to;
+        left out, the API's ``"auto"`` -- and ``login_id`` is the older form
+        of a list of one.
         ``data_connections`` names up to two of the workspace's data
         providers (one per provider): the agent may then look up company
         data (People Data Labs) or financial data (Financial Modeling Prep)
@@ -1370,7 +1381,7 @@ class MeshArc:
         asks the next question in the same conversation.
         """
         body = _agent_body(prompt, urls, schema, max_credits, max_steps, allowed_domains, webhook, connection_id,
-                           login_id, data_connections, proposals, timeout_s)
+                           login_id, data_connections, proposals, timeout_s, logins)
         return AgentRun(self._h, self._h("POST", "/agent", json=body, idempotency_key=idempotency_key))
 
     def conversations(self, q: Optional[str] = None, limit: int = 25) -> Iterator[Json]:
