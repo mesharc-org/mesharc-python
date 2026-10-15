@@ -29,6 +29,16 @@ def test_an_agent_run_names_its_login_data_providers_and_proposals_only_when_giv
     assert body(arc.calls[1]) == {"prompt": "p", "loginId": "L1", "dataConnections": ["c1", "c2"], "proposals": True}
 
 
+def test_logins_need_no_picking_and_are_sent_only_to_change_that():
+    arc = scripted(run(), run(id="r2"), run(id="r3"), {"valid": 1})
+    arc.agent("p")
+    arc.agent("p", logins="none")
+    arc.agent("p", logins=(i for i in ["l1", "l2"]))
+    arc.agent_batches.preview("about {{co}}", csv="co\nAcme\n", max_credits_per_row=10, logins=["l1"])
+    assert "logins" not in body(arc.calls[0])
+    assert [body(c)["logins"] for c in arc.calls[1:]] == ["none", ["l1", "l2"], ["l1"]]
+
+
 def test_a_follow_up_posts_its_own_request_to_the_runs_conversation():
     arc = scripted(run(status="done"), run(id="r2", followsRunId="r1"))
     first = arc.get_agent("r1")
