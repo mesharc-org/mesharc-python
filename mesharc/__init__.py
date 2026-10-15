@@ -34,6 +34,7 @@ import httpx
 
 __version__ = "0.6.0"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl", "AgentRun"]
+TENANT_HEADER = "X-MeshArc-Tenant"
 
 DEFAULT_BASE = "https://api.mesharc.dev"
 DEFAULT_TIMEOUT = 150.0
@@ -102,15 +103,66 @@ def _cancel_agent(http: Any, run_id: str) -> Json:
     return http("DELETE", f"/agent/{run_id}")
 
 
+def _some(**fields: Any) -> Json:
+    """The fields that are not None, as a request body or query: what was
+    left out is left to the API's default (or, in a PATCH, left as it is)."""
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def _agent_body(prompt: str, urls: Optional[Iterable[str]], schema: Optional[Json], max_credits: Optional[int],
+                max_steps: Optional[int], allowed_domains: Optional[Iterable[str]], webhook: Union[str, Json, None],
+                connection_id: Optional[str], login_id: Optional[str], data_connections: Optional[Iterable[str]],
+                proposals: Optional[bool], timeout_s: float) -> Json:
+    """A POST /agent body (and a follow-up's) in the API's own names, naming only what was given."""
+    body: Json = {"prompt": prompt}
+    body.update(_some(schema=schema, maxCredits=max_credits, maxSteps=max_steps, webhook=webhook,
+                      connectionId=connection_id, loginId=login_id, proposals=proposals))
+    if urls is not None:
+        body["urls"] = list(urls)
+    if allowed_domains is not None:
+        body["allowedDomains"] = list(allowed_domains)
+    if data_connections is not None:
+        body["dataConnections"] = list(data_connections)
+    if timeout_s > 0:
+        body["timeout"] = min(timeout_s, 120)
+    return body
+
+
+def _offset_rows(http: Any, path: str, params: Dict[str, Any], limit: int) -> Iterator[Json]:
+    """Every row of an offset-paged list, ``limit`` at a time, until a page
+    comes back short."""
+    offset = 0
+    while True:
+        page = http("GET", path, params={**params, "offset": offset, "limit": limit})
+        rows = page.get("data") or []
+        for row in rows:
+            yield row
+        if len(rows) < limit:
+            return
+        offset += len(rows)
+
+
+def _download(http: Any, method: str, path: str, dest: str, **kw: Any) -> str:
+    """Stream an API file to ``dest``. Returns ``dest``."""
+    with http.stream(method, path, **kw) as r:
+        if r.status_code >= 400:
+            r.read()
+            raise http._error(r)
+        with open(dest, "wb") as fh:
+            for chunk in r.iter_bytes():
+                fh.write(chunk)
+    return dest
+
+
 class _Http:
     """The transport: one httpx client, bearer auth, JSON errors, retries."""
 
-    def __init__(self, api_key: str, base_url: str, timeout: float, max_retries: int) -> None:
-        self._c = httpx.Client(
-            base_url=base_url.rstrip("/") + "/api/v1",
-            headers={"Authorization": f"Bearer {api_key}", "User-Agent": f"mesharc-python/{__version__}"},
-            timeout=timeout,
-        )
+    def __init__(self, api_key: str, base_url: str, timeout: float, max_retries: int, tenant: str = "") -> None:
+        headers = {"Authorization": f"Bearer {api_key}", "User-Agent": f"mesharc-python/{__version__}"}
+        if tenant:
+            # Every request acts on that sub-account of the key's workspace.
+            headers[TENANT_HEADER] = tenant
+        self._c = httpx.Client(base_url=base_url.rstrip("/") + "/api/v1", headers=headers, timeout=timeout)
         self._max_retries = max(0, int(max_retries))
         # What the last response said about the key's rate limit, so a
         # polling loop can slow down before it is refused rather than after.
@@ -270,7 +322,9 @@ class _Monitors:
 
     def create(self, kind: str, request: Json, schedule: str, name: Optional[str] = None,
                webhook: Union[str, Json, None] = None, baseline_id: Optional[str] = None,
-               idempotency_key: Optional[str] = None) -> Json:
+               idempotency_key: Optional[str] = None, budget: Optional[Json] = None, alerts: Optional[Json] = None,
+               add_to_project: Optional[str] = None, rows: Union[bool, Json, None] = None,
+               destination: Optional[str] = None, sentiment: Union[bool, Json, None] = None) -> Json:
         """Keep a search or an agent request and run it on a schedule.
 
         ``kind`` is ``search`` or ``agent``; ``request`` is the body of a
@@ -294,12 +348,25 @@ class _Monitors:
         again; without it the first run starts now. A search baseline's
         ``limit`` must be at least the monitor's.
 
+        ``budget`` is ``{"perRun", "perMonth"}`` in credits (0 or left out:
+        no cap): ``perRun`` lowers an agent monitor's ``maxCredits``, and a
+        run due past ``perMonth`` is skipped, the webhook told
+        ``budget.reached`` once a month. ``alerts`` is ``{"email",
+        "chatUrl"}``: the workspace's run emails and a Slack, Discord, Teams
+        or Google Chat incoming webhook. ``add_to_project`` (a search
+        monitor's) adds its new results on that project's site to the
+        project. ``rows`` (an agent monitor's) follows a list answer record
+        by record -- ``True``, or ``{"path", "key", "confirmAfter"}`` -- read
+        with ``rows()``; ``destination`` writes those records out after each
+        run. ``sentiment`` (a news monitor's) is ``{"connectionId", "only"}``:
+        each run's new results scored positive, neutral or negative by that
+        LLM connection, on your key at 1 credit per 1,000 tokens.
+
         Spends credits and needs a key that can write. Returns the monitor.
         """
         body: Json = {"kind": kind, "request": request, "schedule": schedule}
-        for key, value in (("name", name), ("webhook", webhook), ("baselineId", baseline_id)):
-            if value is not None:
-                body[key] = value
+        body.update(_some(name=name, webhook=webhook, baselineId=baseline_id, budget=budget, alerts=alerts,
+                          addToProject=add_to_project, rows=rows, destination=destination, sentiment=sentiment))
         return self._h("POST", "/monitors", json=body, idempotency_key=idempotency_key)
 
     def list(self, kind: Optional[str] = None) -> List[Json]:
@@ -312,13 +379,20 @@ class _Monitors:
         return self._h("GET", f"/monitors/{monitor_id}")
 
     def update(self, monitor_id: str, name: Optional[str] = None, schedule: Optional[str] = None,
-               status: Optional[str] = None, webhook: Union[str, Json, None] = None) -> Json:
+               status: Optional[str] = None, webhook: Union[str, Json, None] = None,
+               budget: Optional[Json] = None, alerts: Optional[Json] = None, add_to_project: Optional[str] = None,
+               rows: Union[bool, Json, None] = None, destination: Optional[str] = None,
+               sentiment: Union[bool, Json, None] = None) -> Json:
         """Change a monitor's ``name``, ``schedule``, ``status`` (``active`` or
-        ``paused``) or ``webhook``. Only the ones that are not None are sent;
-        ``webhook=""`` removes the webhook, and a new one's secret comes back
-        once, as ``webhookSecret``. Needs a key that can write."""
-        body: Json = {key: value for key, value in (("name", name), ("schedule", schedule), ("status", status),
-                                                    ("webhook", webhook)) if value is not None}
+        ``paused``), ``webhook`` or any setting ``create`` takes. Only the
+        ones that are not None are sent; ``webhook=""`` removes the webhook,
+        and a new one's secret comes back once, as ``webhookSecret``.
+        ``budget``, ``alerts`` and ``sentiment`` are replaced whole (``{}``
+        for none); ``add_to_project=""`` and ``destination=""`` remove them;
+        a new ``rows`` path or key starts the records again. Needs a key that
+        can write."""
+        body = _some(name=name, schedule=schedule, status=status, webhook=webhook, budget=budget, alerts=alerts,
+                     addToProject=add_to_project, rows=rows, destination=destination, sentiment=sentiment)
         return self._h("PATCH", f"/monitors/{monitor_id}", json=body)
 
     def pause(self, monitor_id: str) -> Json:
@@ -353,6 +427,360 @@ class _Monitors:
         in the workspace's history; an agent run it has under way is
         stopped. Returns ``{id, deleted: true}``."""
         return self._h("DELETE", f"/monitors/{monitor_id}")
+
+    def overview(self, kind: Optional[str] = None) -> Json:
+        """Everything on a schedule -- projects and monitors -- as the Monitor
+        screen lists it: each with its next and last run, this month's
+        spend, an estimate of the month and its caps; ``counts`` by kind.
+        ``kind`` keeps ``crawl``, ``search`` or ``agent``."""
+        return self._h("GET", "/monitors/overview", params=_some(kind=kind) or None)
+
+    def rows(self, monitor_id: str, active: Optional[bool] = None, q: Optional[str] = None,
+             limit: int = 100) -> Iterator[Json]:
+        """The records an agent monitor's answers list, as they stand, each
+        with the page every value was read on. ``active=False`` lists the
+        records gone; ``q`` keeps those holding it. ``limit`` is the page
+        size (1,000 at most)."""
+        params = _some(active=None if active is None else str(bool(active)).lower(), q=q)
+        yield from _offset_rows(self._h, f"/monitors/{monitor_id}/rows", params, limit)
+
+    def rows_page(self, monitor_id: str, active: Optional[bool] = None, q: Optional[str] = None,
+                  offset: int = 0, limit: int = 100) -> Json:
+        """One page of ``rows()``, as the API answers it: ``{data, total}``,
+        ``total`` counting every record that matches."""
+        params = _some(active=None if active is None else str(bool(active)).lower(), q=q)
+        return self._h("GET", f"/monitors/{monitor_id}/rows", params={**params, "offset": offset, "limit": limit})
+
+    def row(self, monitor_id: str, key: str) -> Json:
+        """One record: what it is now, the page each value was read on, and every event that touched it."""
+        return self._h("GET", f"/monitors/{monitor_id}/rows/{key}")
+
+    def row_events(self, monitor_id: str, run_id: Optional[str] = None, kind: Optional[str] = None,
+                   limit: int = 200) -> List[Json]:
+        """What moved, newest first: records added, changed (one entry per
+        column, both values), gone and withheld. ``run_id`` keeps one
+        monitor run's; ``kind`` one kind."""
+        return self._h("GET", f"/monitors/{monitor_id}/rows/events",
+                       params={"limit": limit, **_some(run_id=run_id, kind=kind)})["data"]
+
+    def export_rows(self, monitor_id: str, path: str, dataset: str = "rows", fmt: str = "csv") -> str:
+        """Its records (``rows``) or everything that moved (``row-events``)
+        to ``path``, as csv or jsonl. A CSV cell that would start a formula
+        is written as text. Returns ``path``."""
+        return _download(self._h, "GET", f"/monitors/{monitor_id}/rows/export", path,
+                         params={"dataset": dataset, "format": fmt})
+
+
+class _AgentBatches:
+    """The agent over every row of a table: ``arc.agent_batches``.
+
+    One agent run a row, its prompt (and starting URLs) filled from the
+    row's columns, written ``{{column}}``, and its answer the row's new
+    columns. Each row pays only for what it uses, up to
+    ``max_credits_per_row``; the batch never spends more than rows x that
+    cap, or the balance when that is less -- a row it cannot afford is
+    skipped, free.
+    """
+
+    def __init__(self, http: _Http) -> None:
+        self._h = http
+
+    @staticmethod
+    def _body(prompt: str, csv: Optional[str], rows: Optional[List[Json]], max_credits_per_row: Optional[int],
+              urls: Optional[Iterable[str]], schema: Optional[Json], max_steps: Optional[int],
+              allowed_domains: Optional[Iterable[str]], concurrency: Optional[int], name: Optional[str],
+              connection_id: Optional[str], login_id: Optional[str],
+              data_connections: Optional[Iterable[str]]) -> Json:
+        body: Json = {"prompt": prompt}
+        body.update(_some(csv=csv, rows=rows, maxCreditsPerRow=max_credits_per_row, schema=schema,
+                          maxSteps=max_steps, concurrency=concurrency, name=name, connectionId=connection_id,
+                          loginId=login_id))
+        if urls is not None:
+            body["urls"] = list(urls)
+        if allowed_domains is not None:
+            body["allowedDomains"] = list(allowed_domains)
+        if data_connections is not None:
+            body["dataConnections"] = list(data_connections)
+        return body
+
+    def preview(self, prompt: str, csv: Optional[str] = None, rows: Optional[List[Json]] = None,
+                max_credits_per_row: Optional[int] = None, urls: Optional[Iterable[str]] = None,
+                schema: Optional[Json] = None, max_steps: Optional[int] = None,
+                allowed_domains: Optional[Iterable[str]] = None, concurrency: Optional[int] = None,
+                name: Optional[str] = None, connection_id: Optional[str] = None, login_id: Optional[str] = None,
+                data_connections: Optional[Iterable[str]] = None) -> Json:
+        """What ``start`` would do, without starting it or spending anything:
+        the rows that can run and those that cannot (and why), the first
+        prompts as their rows will ask them, and an estimate against the
+        balance."""
+        return self._h("POST", "/agent/batch/preview", json=self._body(
+            prompt, csv, rows, max_credits_per_row, urls, schema, max_steps, allowed_domains, concurrency, name,
+            connection_id, login_id, data_connections))
+
+    def start(self, prompt: str, csv: Optional[str] = None, rows: Optional[List[Json]] = None,
+              max_credits_per_row: Optional[int] = None, urls: Optional[Iterable[str]] = None,
+              schema: Optional[Json] = None, max_steps: Optional[int] = None,
+              allowed_domains: Optional[Iterable[str]] = None, concurrency: Optional[int] = None,
+              name: Optional[str] = None, connection_id: Optional[str] = None, login_id: Optional[str] = None,
+              data_connections: Optional[Iterable[str]] = None, webhook: Union[str, Json, None] = None,
+              idempotency_key: Optional[str] = None) -> Json:
+        """Start one agent run a row of the table.
+
+        The table is ``csv`` (its first line names the columns) or ``rows``,
+        a list of objects. ``prompt`` and ``urls`` name columns as
+        ``{{column}}``; ``schema`` (type ``object``) gives the answer's
+        columns. ``max_credits_per_row`` is required by the API. Without
+        ``allowed_domains`` each row is held to its own URLs' sites; ``[]``
+        lifts the limit. ``concurrency`` rows run at once (3 by default).
+        ``login_id`` and ``data_connections`` are as ``agent()`` takes them,
+        for every row. ``webhook`` is told ``agent.batch.finished`` once; its
+        secret comes back once, as ``webhookSecret``.
+
+        Spends credits and needs a key that can write. Returns the batch,
+        with ``counts`` by row status; ``wait()`` waits for it.
+        """
+        body = self._body(prompt, csv, rows, max_credits_per_row, urls, schema, max_steps, allowed_domains,
+                          concurrency, name, connection_id, login_id, data_connections)
+        if webhook is not None:
+            body["webhook"] = webhook
+        return self._h("POST", "/agent/batch", json=body, idempotency_key=idempotency_key)
+
+    def get(self, batch_id: str, offset: int = 0, limit: int = 50, status: Optional[str] = None) -> Json:
+        """A batch and one page of its rows in table order (200 at most), each
+        with its status, answer, sources, credits and run. ``status`` keeps
+        one status. Raises ``MeshArcError`` 410 (``expired``) past its keep
+        date."""
+        return self._h("GET", f"/agent/batch/{batch_id}",
+                       params={"offset": offset, "limit": limit, **_some(status=status)})
+
+    def rows(self, batch_id: str, status: Optional[str] = None, limit: int = 200) -> Iterator[Json]:
+        """Every row of a batch, in table order; ``status`` keeps one status."""
+        offset = 0
+        while True:
+            page = self.get(batch_id, offset=offset, limit=limit, status=status)
+            rows = page.get("data") or []
+            for row in rows:
+                yield row
+            if not page.get("more") or not rows:
+                return
+            offset += len(rows)
+
+    def wait(self, batch_id: str, poll: float = 5.0, timeout: float = 3600) -> Json:
+        """Block until every row has ended. Returns the batch (its first rows under ``data``)."""
+        deadline = time.time() + timeout
+        while True:
+            batch = self.get(batch_id, limit=1)
+            if not _running(batch.get("status")):
+                return batch
+            if time.time() >= deadline:
+                raise MeshArcTimeoutError(f"agent batch {batch_id} is still {batch.get('status')} after {timeout}s",
+                                          batch_id)
+            time.sleep(poll)
+            self._h.pace()
+
+    def list(self, limit: int = 25) -> Iterator[Json]:
+        """The workspace's batches, newest first, without their rows."""
+        yield from _paged(self._h, "/agent/batch", {"limit": limit})
+
+    def cancel(self, batch_id: str) -> Json:
+        """Stop it: rows not started are cancelled, running ones stop before
+        their next step. What rows used stays charged; their answers are kept."""
+        return self._h("DELETE", f"/agent/batch/{batch_id}")
+
+    def export(self, batch_id: str, path: str, fmt: str = "csv") -> str:
+        """The table as sent, each answer value a new column, then each row's
+        credits, sources, error and run, to ``path`` as csv or jsonl. A CSV
+        cell that would start a formula is written as text. Returns ``path``."""
+        return _download(self._h, "GET", f"/agent/batch/{batch_id}/export", path, params={"format": fmt})
+
+
+class _Triggers:
+    """A change or a new result starts work: ``arc.triggers``."""
+
+    def __init__(self, http: _Http) -> None:
+        self._h = http
+
+    def create(self, source: Json, action: Json, when: Optional[Json] = None, limits: Optional[Json] = None,
+               name: Optional[str] = None, status: Optional[str] = None) -> Json:
+        """Start work when a source matches.
+
+        ``source`` is ``{"kind": "project" | "monitor", "id"}``. ``when`` is
+        a project's ``{kinds, paths, fields, minWords, significant}`` or a
+        monitor's ``{events}``. ``action`` is ``{"type": "agent", "prompt",
+        ...}`` (a template: ``{{url}}``, ``{{before}}``, ``{{after}}``,
+        ``{{changes}}``, ``{{source}}``), ``{"type": "recrawl"}``, or
+        ``{"type": "monitor" | "recheck", "monitorId"}``. ``limits`` is
+        ``{cooldownMinutes, maxPerDay, perMonth}``. It looks from now on.
+        Needs a key that can write."""
+        body: Json = {"source": source, "action": action}
+        body.update(_some(when=when, limits=limits, name=name, status=status))
+        return self._h("POST", "/triggers", json=body)
+
+    def list(self, source_id: Optional[str] = None, target_id: Optional[str] = None) -> List[Json]:
+        """The workspace's triggers, newest first; ``source_id`` keeps one
+        project's or monitor's, ``target_id`` those whose action runs a monitor."""
+        return self._h("GET", "/triggers", params=_some(source_id=source_id, target_id=target_id) or None)["data"]
+
+    def get(self, trigger_id: str) -> Json:
+        return self._h("GET", f"/triggers/{trigger_id}")
+
+    def update(self, trigger_id: str, name: Optional[str] = None, when: Optional[Json] = None,
+               action: Optional[Json] = None, limits: Optional[Json] = None, status: Optional[str] = None) -> Json:
+        """Its name, condition, action, limits or status (``active`` /
+        ``paused``); only what is not None is sent. Resumed, it looks from then on."""
+        return self._h("PATCH", f"/triggers/{trigger_id}",
+                       json=_some(name=name, when=when, action=action, limits=limits, status=status))
+
+    def delete(self, trigger_id: str) -> Json:
+        """The trigger and its firing history. What it started stays."""
+        return self._h("DELETE", f"/triggers/{trigger_id}")
+
+    def fires(self, trigger_id: str, limit: int = 25) -> Iterator[Json]:
+        """Its firing history, newest first: what each source run matched, and
+        what it started or why it was skipped. Kept 90 days."""
+        yield from _paged(self._h, f"/triggers/{trigger_id}/fires", {"limit": limit})
+
+    def preview(self, trigger_id: str) -> Json:
+        """What the source's latest run would make of it -- what matches, and
+        an agent action's prompt as it would be sent. Fires nothing."""
+        return self._h("POST", f"/triggers/{trigger_id}/preview")
+
+
+class _Proposals:
+    """What agents proposed to watch, for a member to approve: ``arc.proposals``."""
+
+    def __init__(self, http: _Http) -> None:
+        self._h = http
+
+    def list(self, status: str = "proposed", run_id: Optional[str] = None) -> List[Json]:
+        """Newest first: those waiting (``proposed``, the default), the
+        ``approved``, or all (``""``); ``run_id`` keeps one agent run's."""
+        return self._h("GET", "/proposals", params={"status": status, **_some(run_id=run_id)})["data"]
+
+    def approve(self, proposal_id: str) -> Json:
+        """Make what was proposed: the project, or the monitor, whose first
+        run starts now. Returns ``{proposal, made: {kind, id}}``. Raises
+        ``MeshArcError`` 409 when it was decided already, 402 at the project
+        limit or with no credits left."""
+        return self._h("POST", f"/proposals/{proposal_id}/approve")
+
+    def dismiss(self, proposal_id: str) -> Json:
+        """Not wanted: the proposal is deleted."""
+        return self._h("POST", f"/proposals/{proposal_id}/dismiss")
+
+
+class _SubAccounts:
+    """Workspaces this one makes for its own customers: ``arc.sub_accounts``.
+
+    Each has its own keys, projects and data, spends this workspace's
+    credits under a cap of its own, and is on this workspace's plan (Scale
+    and Enterprise). Acting inside one: ``arc.as_sub_account(id)``. Every
+    call needs an admin key.
+    """
+
+    def __init__(self, http: _Http) -> None:
+        self._h = http
+
+    def list(self) -> Json:
+        """``{data, allowed, spent, remaining}``: each sub-account with this
+        month's spend, how many the plan allows, and what they spent in all."""
+        return self._h("GET", "/orgs/children")
+
+    def create(self, name: str, monthly_cap: Optional[int] = None, external_id: Optional[str] = None,
+               idempotency_key: Optional[str] = None) -> Json:
+        """A sub-account; ``monthly_cap`` in credits (0 or None: no cap of
+        its own), ``external_id`` your own id for it, echoed back."""
+        return self._h("POST", "/orgs/children", idempotency_key=idempotency_key,
+                       json={"name": name, **_some(monthlyCap=monthly_cap, externalId=external_id)})
+
+    def get(self, child_id: str) -> Json:
+        """One sub-account: its month, its spend by kind, its latest charges,
+        and which of your keys acted on it these 30 days."""
+        return self._h("GET", f"/orgs/children/{child_id}")
+
+    def update(self, child_id: str, name: Optional[str] = None, monthly_cap: Optional[int] = None,
+               suspended: Optional[bool] = None, reason: Optional[str] = None) -> Json:
+        """Rename it, set its cap (0: none), or suspend it -- which refuses its
+        keys and cancels what it has running -- and lift that."""
+        return self._h("PATCH", f"/orgs/children/{child_id}",
+                       json=_some(name=name, monthlyCap=monthly_cap, suspended=suspended, reason=reason))
+
+    def keys(self, child_id: str) -> List[Json]:
+        return self._h("GET", f"/orgs/children/{child_id}/keys")
+
+    def create_key(self, child_id: str, name: str = "default", scopes: Optional[List[str]] = None,
+                   expires_in_days: Optional[int] = None, rpm: Optional[int] = None) -> Json:
+        """A key of the sub-account's own, for your customer: it reaches that
+        workspace and nothing else. The plaintext is under ``key``, once."""
+        return self._h("POST", f"/orgs/children/{child_id}/keys",
+                       json={"name": name, **_some(scopes=scopes, expires_in_days=expires_in_days, rpm=rpm)})
+
+    def revoke_key(self, child_id: str, key_id: str) -> None:
+        self._h("DELETE", f"/orgs/children/{child_id}/keys/{key_id}")
+
+
+class _Connections:
+    """The workspace's connections -- destinations, models and data
+    providers: ``arc.connections``. Secrets are sent, never returned.
+    Creating, changing, testing and deleting need an admin key."""
+
+    def __init__(self, http: _Http) -> None:
+        self._h = http
+
+    def providers(self) -> Json:
+        """The catalogue: each provider's kind, fields, secrets and note."""
+        return self._h("GET", "/connections/providers")
+
+    def list(self) -> List[Json]:
+        return self._h("GET", "/connections")["connections"]
+
+    def create(self, provider: str, name: Optional[str] = None, config: Optional[Json] = None,
+               secrets: Optional[Json] = None) -> Json:
+        """A connection: ``provider`` from ``providers()`` (``"pdl"`` and
+        ``"fmp"`` are the data providers the agent reads, with
+        ``secrets={"api_key": ...}``). Test it with ``test()``."""
+        return self._h("POST", "/connections", json={"provider": provider, **_some(name=name, config=config,
+                                                                                    secrets=secrets)})
+
+    def get(self, connection_id: str) -> Json:
+        return self._h("GET", f"/connections/{connection_id}")
+
+    def update(self, connection_id: str, name: Optional[str] = None, config: Optional[Json] = None,
+               secrets: Optional[Json] = None) -> Json:
+        return self._h("PATCH", f"/connections/{connection_id}", json=_some(name=name, config=config, secrets=secrets))
+
+    def delete(self, connection_id: str) -> None:
+        self._h("DELETE", f"/connections/{connection_id}")
+
+    def test(self, connection_id: str) -> Json:
+        """Reach the provider with the stored credentials: ``{status, error, detail}``."""
+        return self._h("POST", f"/connections/{connection_id}/test")
+
+
+class _Logins:
+    """The workspace's saved logins: ``arc.logins``. A login is saved in the
+    app, from a live browser; here it is listed, renamed, expired, tested
+    and deleted. Its session is never returned. Every call needs an admin key."""
+
+    def __init__(self, http: _Http) -> None:
+        self._h = http
+
+    def list(self) -> Json:
+        """``{data, enabled, why}``: each login's site, status and use, and
+        whether logins are switched on where this API runs."""
+        return self._h("GET", "/logins")
+
+    def update(self, login_id: str, name: Optional[str] = None, expired: Optional[bool] = None) -> Json:
+        """Rename it; ``expired=True`` stops using it now."""
+        return self._h("PATCH", f"/logins/{login_id}", json=_some(name=name, expired=expired))
+
+    def delete(self, login_id: str) -> None:
+        """Delete it: projects and runs that name it stop, saying so."""
+        self._h("DELETE", f"/logins/{login_id}")
+
+    def test(self, login_id: str) -> Json:
+        """One plain fetch of the site's front page with it: ``{status, finalUrl, loginPage, reason}``. Free."""
+        return self._h("POST", f"/logins/{login_id}/test")
 
 
 class Crawl:
@@ -480,7 +908,9 @@ class AgentRun:
 
     @property
     def sources(self) -> List[Json]:
-        """The pages the answer rests on, as ``{url, title, pageId}``."""
+        """What the answer rests on: pages, as ``{url, title, pageId}``, and
+        data providers' records, as ``{url, title, provider}`` -- ``url`` the
+        request it came from."""
         return self.envelope.get("sources") or []
 
     @property
@@ -575,12 +1005,34 @@ class AgentRun:
         run._webhook_secret = run._webhook_secret or self.webhook_secret
         return run
 
+    def follow_up(self, prompt: str, urls: Optional[Iterable[str]] = None, schema: Optional[Json] = None,
+                  max_credits: Optional[int] = None, max_steps: Optional[int] = None,
+                  allowed_domains: Optional[Iterable[str]] = None, webhook: Union[str, Json, None] = None,
+                  connection_id: Optional[str] = None, login_id: Optional[str] = None,
+                  data_connections: Optional[Iterable[str]] = None, proposals: Optional[bool] = None,
+                  timeout_s: float = 0, idempotency_key: Optional[str] = None) -> AgentRun:
+        """Ask a follow-up in this run's conversation; returns its ``AgentRun``.
+
+        It answers after everything asked and found in the conversation
+        before it, and may read again, free, any page the conversation read.
+        Its request is its own, as ``agent()`` takes one, and it pays for its
+        own work. This run must be the conversation's latest message, and
+        finished: ``MeshArcError`` 409 (``conflict``) otherwise -- the error
+        names the latest -- or past 30 messages; 410 (``expired``) past its
+        keep date.
+        """
+        body = _agent_body(prompt, urls, schema, max_credits, max_steps, allowed_domains, webhook, connection_id,
+                           login_id, data_connections, proposals, timeout_s)
+        return AgentRun(self._h, self._h("POST", f"/agent/{self.id}/follow-up", json=body,
+                                         idempotency_key=idempotency_key))
+
     def trace(self, after: int = 0, follow: bool = True, poll: float = 2.0,
               timeout: float = 3600) -> Iterator[Json]:
         """What the agent did, step by step, as ``{seq, t, kind, text, ...}``.
 
         ``kind`` is start, resume, continue, model, search, fetch, render,
-        map, select, extract, tool, busy or finish. ``after`` is the ``seq``
+        map, select, extract, lookup (a data provider's), propose, tool,
+        busy or finish. ``after`` is the ``seq``
         of the last event already seen, to resume after it. With ``follow``
         this keeps reading until the run ends, polling every ``poll``
         seconds; ``follow=False`` yields what exists and returns. A run
@@ -629,19 +1081,39 @@ class MeshArc:
     ``timeout`` is the HTTP timeout per request in seconds; ``max_retries``
     how many times a request that is safe to repeat is retried on 429,
     502, 503, 504 or a network failure. ``base_url`` is for MeshArc's own
-    test environments; the hosted API needs nothing there.
+    test environments; the hosted API needs nothing there. ``tenant`` is
+    the id of one of the workspace's sub-accounts: every request then acts
+    on it (``as_sub_account`` makes such a client from this one).
     """
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None,
-                 timeout: float = DEFAULT_TIMEOUT, max_retries: int = DEFAULT_MAX_RETRIES) -> None:
+                 timeout: float = DEFAULT_TIMEOUT, max_retries: int = DEFAULT_MAX_RETRIES,
+                 tenant: Optional[str] = None) -> None:
         key = api_key or os.environ.get("MESHARC_API_KEY") or ""
         if not key:
             raise ValueError("An API key is required: MeshArc('mesharc_...') or set MESHARC_API_KEY.")
         base = base_url or os.environ.get("MESHARC_API_URL") or DEFAULT_BASE
-        self._h = _Http(key, base, timeout, max_retries)
+        # What as_sub_account() makes its client with.
+        self._key, self._base, self._timeout, self._max_retries = key, base, timeout, max_retries
+        self.tenant: str = tenant or ""
+        self._h = _Http(key, base, timeout, max_retries, tenant=self.tenant)
         self.projects = _Projects(self._h)
         self.runs = _Runs(self._h)
         self.monitors = _Monitors(self._h)
+        self.agent_batches = _AgentBatches(self._h)
+        self.triggers = _Triggers(self._h)
+        self.proposals = _Proposals(self._h)
+        self.sub_accounts = _SubAccounts(self._h)
+        self.connections = _Connections(self._h)
+        self.logins = _Logins(self._h)
+
+    def as_sub_account(self, sub_account_id: str) -> "MeshArc":
+        """A client on the same key that acts on one of this workspace's
+        sub-accounts: each request carries ``X-MeshArc-Tenant``, and is the
+        sub-account's, with the key's own scopes and rate limit. Only a key
+        of the sub-account's parent, not held to some projects, may do this;
+        any other id is a 404. Each use is logged. Close it when done."""
+        return MeshArc(self._key, self._base, self._timeout, self._max_retries, tenant=sub_account_id)
 
     def extract(self, url: str, config: Optional[Json] = None, wait: bool = True, poll: float = 2.0,
                 timeout: float = 300) -> Json:
@@ -861,7 +1333,8 @@ class MeshArc:
               max_credits: Optional[int] = None, max_steps: Optional[int] = None,
               allowed_domains: Optional[Iterable[str]] = None, webhook: Union[str, Json, None] = None,
               connection_id: Optional[str] = None, timeout_s: float = 0,
-              idempotency_key: Optional[str] = None) -> AgentRun:
+              idempotency_key: Optional[str] = None, login_id: Optional[str] = None,
+              data_connections: Optional[Iterable[str]] = None, proposals: Optional[bool] = None) -> AgentRun:
         """Hand a question to the agent: it searches, reads pages and answers.
 
         Needs an API key that can write, and spends credits: pages as they
@@ -882,28 +1355,49 @@ class MeshArc:
         secret its messages are signed with comes back once, as
         ``AgentRun.webhook_secret``.
 
+        ``login_id`` is one of the workspace's saved logins: pages on its
+        site are read signed in, every other site signed out.
+        ``data_connections`` names up to two of the workspace's data
+        providers (one per provider): the agent may then look up company
+        data (People Data Labs) or financial data (Financial Modeling Prep)
+        on your own key, at no MeshArc credits, each record a source.
+        ``proposals=True`` lets it propose things to watch, which wait in
+        ``arc.proposals`` for a member to approve.
+
         Returns an ``AgentRun`` at once, queued or running, unless
         ``timeout_s`` asks the API to hold the request for the answer (120
-        at most); ``AgentRun.wait()`` waits for it.
+        at most); ``AgentRun.wait()`` waits for it. ``AgentRun.follow_up()``
+        asks the next question in the same conversation.
         """
-        body: Json = {"prompt": prompt}
-        if urls is not None:
-            body["urls"] = list(urls)
-        if schema is not None:
-            body["schema"] = schema
-        if max_credits is not None:
-            body["maxCredits"] = max_credits
-        if max_steps is not None:
-            body["maxSteps"] = max_steps
-        if allowed_domains is not None:
-            body["allowedDomains"] = list(allowed_domains)
-        if webhook is not None:
-            body["webhook"] = webhook
-        if connection_id is not None:
-            body["connectionId"] = connection_id
-        if timeout_s > 0:
-            body["timeout"] = min(timeout_s, 120)
+        body = _agent_body(prompt, urls, schema, max_credits, max_steps, allowed_domains, webhook, connection_id,
+                           login_id, data_connections, proposals, timeout_s)
         return AgentRun(self._h, self._h("POST", "/agent", json=body, idempotency_key=idempotency_key))
+
+    def conversations(self, q: Optional[str] = None, limit: int = 25) -> Iterator[Json]:
+        """The workspace's agent conversations, the latest message first, each
+        ``{id, title, messages, status, lastRunId, creditsUsed, ...}``; ``q``
+        keeps those whose first question holds it. Kept 7 days after the
+        last message. A table's rows are not listed."""
+        yield from _paged(self._h, "/agent/conversations", {"limit": limit, **_some(q=q)})
+
+    def conversation(self, thread_id: str) -> Json:
+        """One conversation with every run in it, oldest first under ``runs``,
+        each as ``get_agent`` reads one. Raises ``MeshArcError`` 410 past its
+        keep date."""
+        return self._h("GET", f"/agent/conversations/{thread_id}")
+
+    def estimate(self, kind: str, schedule: str, project_id: Optional[str] = None,
+                 monitor_id: Optional[str] = None, max_pages: Optional[int] = None, max_tier: Optional[str] = None,
+                 max_credits: Optional[int] = None, month_cap: Optional[int] = None) -> Json:
+        """About how many credits scheduled work costs a month, before it is
+        saved: a ``crawl`` (``project_id``, or ``max_pages`` and ``max_tier``
+        for one not made yet), a ``search`` or an ``agent`` (``monitor_id``,
+        or ``max_credits``), on an ``hourly``, ``daily`` or ``weekly``
+        schedule, held to ``month_cap``. ``upTo`` says the figure is the most
+        a run could cost, nothing having run yet."""
+        return self._h("GET", "/estimate", params={"kind": kind, "schedule": schedule, **_some(
+            projectId=project_id, monitorId=monitor_id, maxPages=max_pages, maxTier=max_tier,
+            maxCredits=max_credits, monthCap=month_cap)})
 
     def get_agent(self, run_id: str) -> AgentRun:
         """A handle on an agent run started earlier or elsewhere.
@@ -1002,21 +1496,12 @@ class MeshArc:
         ``urls`` restricts the export to those pages. Returns ``path``.
         """
         if urls:
-            ctx = self._h.stream("POST", f"/projects/{project_id}/export",
-                                 json={"dataset": dataset, "format": fmt, "run_id": run_id, "urls": list(urls)})
-        else:
-            params: Dict[str, Any] = {"dataset": dataset, "format": fmt}
-            if run_id:
-                params["run_id"] = run_id
-            ctx = self._h.stream("GET", f"/projects/{project_id}/export", params=params)
-        with ctx as r:
-            if r.status_code >= 400:
-                r.read()
-                raise self._h._error(r)
-            with open(path, "wb") as fh:
-                for chunk in r.iter_bytes():
-                    fh.write(chunk)
-        return path
+            return _download(self._h, "POST", f"/projects/{project_id}/export", path,
+                             json={"dataset": dataset, "format": fmt, "run_id": run_id, "urls": list(urls)})
+        params: Dict[str, Any] = {"dataset": dataset, "format": fmt}
+        if run_id:
+            params["run_id"] = run_id
+        return _download(self._h, "GET", f"/projects/{project_id}/export", path, params=params)
 
     def me(self) -> Json:
         """The workspace, its plan and limits, and what this key may do."""
