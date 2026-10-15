@@ -1362,11 +1362,13 @@ class MeshArc:
         secret its messages are signed with comes back once, as
         ``AgentRun.webhook_secret``.
 
-        The workspace's saved logins need no picking: each page on a site
-        with one is read signed in with that site's login, every other page
-        signed out, so one run can read several sites signed in. ``logins``
-        changes that -- ``"none"``, or a list of login ids to keep it to;
-        left out, the API's ``"auto"`` -- and ``login_id`` is the older form
+        The workspace's saved logins need no picking: the agent reads pages
+        signed out, as the public sees them, and signs in page by page
+        where a page needs the account, with the login for that page's
+        site -- so one run can read a site's public pages signed out and
+        its account pages signed in. ``logins`` says which it may use --
+        ``"none"``, or a list of login ids to keep it to; left out, the
+        API's ``"auto"``, every one -- and ``login_id`` is the older form
         of a list of one.
         ``data_connections`` names up to two of the workspace's data
         providers (one per provider): the agent may then look up company

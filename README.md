@@ -283,12 +283,12 @@ A follow-up answers after everything asked and found in the conversation before 
 run = arc.agent(
     "How many employees does Stripe have, and what was Apple's revenue last year?",
     data_connections=["conn_pdl", "conn_fmp"],   # the workspace's data providers, one per provider
-    login_id=None,                               # a saved login: its site read signed in
+    logins="auto",                               # the saved logins it may sign in with (the default)
     proposals=True,                              # it may propose things to watch
 )
 ```
 
-`data_connections=` names up to two of the workspace's data-provider connections (`arc.connections`, below): People Data Labs for company data, Financial Modeling Prep for financial data. The agent may then look things up on your own key — the provider bills it, MeshArc charges no credits — and each record found is one of `run.sources`, as `{url, title, provider}`, `url` being the request it came from (your key is never in it). `login_id=` is one of the workspace's saved logins (`arc.logins`): pages on its site are read signed in, every other site signed out; logins are switched on per deployment. `proposals=True` lets the agent propose crawling a site or keeping a search or question on a schedule; nothing is made until a member approves it (`arc.proposals`).
+`data_connections=` names up to two of the workspace's data-provider connections (`arc.connections`, below): People Data Labs for company data, Financial Modeling Prep for financial data. The agent may then look things up on your own key — the provider bills it, MeshArc charges no credits — and each record found is one of `run.sources`, as `{url, title, provider}`, `url` being the request it came from (your key is never in it). The agent reads pages signed out and signs in, page by page, where a page needs the account, with the workspace's saved login for that page's site (`arc.logins`); `logins=` says which it may use (every one by default, `"none"`, or a list of ids), and `login_id=` is the older form of a list of one; logins are switched on per deployment. `proposals=True` lets the agent propose crawling a site or keeping a search or question on a schedule; nothing is made until a member approves it (`arc.proposals`).
 
 ## Monitors: a search or a question, asked again on a schedule
 
