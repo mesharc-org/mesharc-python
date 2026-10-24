@@ -111,6 +111,14 @@ def test_a_crawl_handle_pages_through_its_rows_and_follows_the_cursor():
     assert "cursor=abc" in str(arc.calls[2].url)
 
 
+def test_a_crawl_sends_its_webhook_as_given_include_and_all():
+    arc = scripted({"id": "c3", "status": "running", "url": "https://d.test/", "webhookSecret": "whsec_y"})
+    webhook = {"url": "https://hooks.test/h", "events": ["crawl.page"], "include": ["markdown"]}
+    job = arc.crawl("https://d.test/", limit=5, webhook=webhook)
+    assert json.loads(arc.calls[0].content) == {"url": "https://d.test/", "limit": 5, "webhook": webhook}
+    assert job.webhook_secret == "whsec_y"
+
+
 def test_a_web_search_posts_its_body_with_the_key_and_polls_by_id():
     arc = scripted({"id": "s1", "status": "running", "data": []},
                    {"id": "s1", "status": "done", "data": [{"url": "https://a.test/"}]})

@@ -1230,6 +1230,13 @@ class MeshArc:
         ``limit``, ``maxDepth``, ``includePaths``, ``excludePaths``,
         ``crawlMode``, ``maxAge``, ``maxTier``, ``scrapeOptions``,
         ``webhook`` -- and ``config`` takes any project setting directly.
+
+        ``webhook`` is a URL, or ``{"url", "events", "metadata", "include"}``:
+        ``"include": ["markdown"]`` (the one value) puts each page's markdown
+        in the ``crawl.page`` messages, up to about 1 MB a message; a page that
+        does not fit, or was not stored, comes as ``markdown: None`` with
+        ``markdownOmitted`` and a ``contentUrl``, an API path read with your
+        key (``job.page(url)`` reads the same).
         """
         job = Crawl(self._h, self._h("POST", "/crawl", json={"url": url, **opts}, idempotency_key=idempotency_key))
         if wait:
