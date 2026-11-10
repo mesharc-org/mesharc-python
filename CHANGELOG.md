@@ -59,6 +59,7 @@ All notable changes to this package are recorded here. The format follows
 
 - `map_site`'s `sections` come from the whole map, not only the `limit` URLs it returns: ten URLs of a 1,485-URL site named one section.
 - The MCP server says its version in the handshake (`serverInfo.version`, the package's); it said `""`.
+- The MCP `scrape_urls` tool says why a short page can cost 4 credits: the API renders it once to see what its scripts add (example.com adds its notice in five languages) and keeps the render when they add text; `config={"render_js": "never"}` reads only what the server sent, at 1.
 - The MCP tools' `parse_documents` parameter and settings guide said spreadsheets are read; it reads PDFs (a scanned one by OCR) and Word (`.docx`) files, and records other Office files as seen.
 - `agent_batches.wait()` waits while a table is `cancelling` -- its rows still stopping -- and returns once it has ended. It returned at `cancelling`, before the rows had stopped.
 - `AgentRun.follows_run_id` and `followed_by` name the message a follow-up follows and the one asked after it, as `continues_run_id` and `continued_by` do for a continuation.
