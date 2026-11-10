@@ -38,6 +38,7 @@ import os
 import time
 import uuid
 from collections import OrderedDict
+from datetime import datetime, timezone
 from itertools import islice
 from typing import Annotated, Any, Literal
 
@@ -152,8 +153,14 @@ class ScrapeOut(TypedDict, total=False):
         "excerpts sharing 60,000 characters. One URL: that page in full, each body asked for capped at 12,000 "
         "characters."))]
     index: Annotated[Any, Field(description=(
-        "A list only: every url as {url, title, words, status}, so none is lost when excerpts are cut."))]
+        "A list only: every url as {url, title, words, status}, so none is lost when excerpts are cut. A url "
+        "that did not come back ok also has reason and errorCode, e.g. status 'missing' with errorCode "
+        "DNS_FAILED is a name that does not resolve, not a 404."))]
     rest: Annotated[Any, Field(description="A list past its index: {count, byStatus, notOk} for the urls not shown.")]
+    reused: Annotated[Any, Field(description=(
+        "true when this is the read an identical call made in the last ten minutes, not a new one; "
+        "force_refresh=true reads again."))]
+    ageSeconds: Annotated[Any, Field(description="With reused: how many seconds ago that read finished.")]
     page: Annotated[Any, Field(description=(
         "full=true only: the page in full -- markdown, html, head {title, description, canonical, h1}, fields, "
         "images, engine, pageStatus -- with each body capped at 12,000 characters."))]
@@ -680,7 +687,26 @@ def _index_row(p):
     head = p.get("head")
     return {"url": p.get("url", ""),
             "title": (head.get("title") or "") if isinstance(head, dict) else "",
-            "words": p.get("words"), "status": p.get("status")}
+            "words": p.get("words"), "status": p.get("status"), **_why(p)}
+
+
+def _why(p):
+    """Why a page did not come back ok, when the API said: {reason, errorCode}.
+
+    A name that does not resolve reads `missing`, as a 404 does; the reason
+    and the code (DNS_FAILED) are what tell the two apart, and an index row
+    used to drop both (MCP re-test, 11 Nov 2026). Nothing for a page that is ok.
+    """
+    if p.get("status") in ("ok", 200, None):
+        return {}
+    out = {}
+    reason = p.get("reason") or p.get("error")
+    if isinstance(reason, str) and reason:
+        out["reason"] = reason[:200]
+    code = p.get("errorCode")
+    if isinstance(code, str) and code and code != "OK":
+        out["errorCode"] = code
+    return out
 
 
 def _summary_page(p, cap, how=""):
@@ -906,7 +932,7 @@ def _shape_batch(base, rows, reserve):
         not_ok, size = [], 0
         for p in rest:
             if p.get("status") != "ok":
-                row = {"url": p.get("url", ""), "status": p.get("status")}
+                row = {"url": p.get("url", ""), "status": p.get("status"), **_why(p)}
                 size += _cost(row)
                 if size > REST_BUDGET:
                     break
@@ -952,6 +978,48 @@ def _scope():
 
 
 _SESSION = uuid.uuid4().hex[:8]
+
+# How long a repeated scrape or crawl lands on the job the first call made.
+# The key is the call's inputs, so that a retry -- the client's on a dropped
+# connection, the assistant's after a timeout -- does not start the work
+# twice; the API remembers a key for a day, and without the window the same
+# list sent the next morning came back as yesterday's batch, unmarked (MCP
+# re-test, 11 Nov 2026). run_agent and create_monitor already key this way.
+REUSE_WINDOW_S = 600
+
+
+def _window():
+    return int(time.time() // REUSE_WINDOW_S)
+
+
+def _age_s(stamp):
+    """Seconds since an ISO 8601 time the API gave, or None when it gave none."""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - at).total_seconds())
+
+
+# A read this much older than the call that returned it was made by an
+# earlier call. Wide enough that two clocks a few seconds apart -- this
+# process's and the API's -- never mark a read made just now.
+REUSED_PAST_S = 60
+
+
+def _mark_reused(out, stamp, started):
+    """Say so when an answer was made by an earlier call: read before this
+    one began. `reused` and `ageSeconds` tell an assistant the content is
+    not from now, and force_refresh reads it again."""
+    age = _age_s(stamp)
+    if isinstance(out, dict) and age is not None and age > (time.monotonic() - started) + REUSED_PAST_S:
+        out["reused"] = True
+        out["ageSeconds"] = int(age)
+    return out
 
 
 def _scopes():
@@ -1040,7 +1108,8 @@ def _safe(fn):
                   "(example.com adds five languages), and kept at 4 when they add text; config {\"render_js\": "
                   "\"never\"} reads only what the server sent, at 1.\n"
                   "Lists: a list runs as one batch. If it outlasts the connection's time limit, a job comes back "
-                  "for get_job, and sending the same list again returns that batch.\n"
+                  "for get_job, and sending the same list again within ten minutes returns that batch, marked "
+                  "reused with its ageSeconds; after that, or with force_refresh=true, the URLs are read again.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
 def scrape_urls(urls: Annotated[list[str], Field(
                     description="Absolute http(s) URLs, 1 to 500; exactly one when full is true.")],
@@ -1053,6 +1122,10 @@ def scrape_urls(urls: Annotated[list[str], Field(
                 full: Annotated[bool, Field(
                     description="true reads the one URL in full -- raw html, head and extracted fields, images, "
                                 "the engine used -- running config's browser actions first. Default false.")]
+                = False,
+                force_refresh: Annotated[bool, Field(
+                    description="true reads the URLs again now, even when the same call was made in the last ten "
+                                "minutes (which otherwise returns that read, marked reused). Default false.")]
                 = False) -> ScrapeOut:
     def go():
         cfg = _with_documents(config, parse_documents)
@@ -1072,25 +1145,29 @@ def scrape_urls(urls: Annotated[list[str], Field(
                     r["config"] = {k: v for k, v in r["config"].items() if k in (cfg or {})}
                 return r
         # A key of our own, so a retry -- the client's on a dropped
-        # connection, the assistant's on a 429 -- lands on the same job.
-        key = _key("scrape", urls, cfg, formats)
+        # connection, the assistant's on a 429 -- lands on the same job, for
+        # REUSE_WINDOW_S. force_refresh is a key nothing else has: read now.
+        key = _key("scrape", urls, cfg, formats, uuid.uuid4().hex if force_refresh else _window())
+        started = time.monotonic()
         with _client() as s:
             if len(urls) == 1:
                 # One URL takes the synchronous path: the API holds the
                 # request open for the page rather than making us poll.
-                return {"status": "done", "urls": 1,
-                        "pages": [_trim_page(s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key))]}
+                page = _trim_page(s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key))
+                return _mark_reused({"status": "done", "urls": 1, "pages": [page]},
+                                    page.get("crawledAt") if isinstance(page, dict) else None, started)
             # A list is a batch, and `scrape` waits for every row -- for up to
             # an hour by default. Hosted, that wait is bounded and the batch id
             # comes back instead, for get_job to pick up.
             budget = _budget()
-            if budget is None:
-                return _batch_result(s.scrape(urls, config=cfg, formats=formats, idempotency_key=key))
             try:
-                return _batch_result(s.scrape(urls, config=cfg, formats=formats,
-                                              idempotency_key=key, timeout=budget))
+                b = (s.scrape(urls, config=cfg, formats=formats, idempotency_key=key) if budget is None
+                     else s.scrape(urls, config=cfg, formats=formats, idempotency_key=key, timeout=budget))
             except MeshArcTimeoutError as exc:
+                if budget is None:
+                    raise
                 return _still_running("batch", getattr(exc, "job_id", "") or "")
+            return _mark_reused(_batch_result(b), b.get("finishedAt") if isinstance(b, dict) else None, started)
     return _safe(go)
 
 
@@ -1186,7 +1263,9 @@ def crawl_site(url: Annotated[str, Field(description="The absolute http(s) URL t
                 opts["excludePaths"] = exclude_paths
             if config:
                 opts["config"] = config
-            job = s.crawl(url, idempotency_key=_key("crawl", url, opts), **opts)
+            # The window as scrape_urls has it: the same crawl asked for again
+            # later is a new crawl, not the one the API remembers for a day.
+            job = s.crawl(url, idempotency_key=_key("crawl", url, opts, _window()), **opts)
             # Waited for first, then walked. `_walk` takes its cursor after the
             # first PAGES_CAP rows, which is a batch boundary only when every
             # batch comes back full -- on a finished crawl. Walked while it ran,

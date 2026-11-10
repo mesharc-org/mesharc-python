@@ -57,6 +57,8 @@ All notable changes to this package are recorded here. The format follows
 
 ### Fixed
 
+- **The MCP `scrape_urls` and `crawl_site` tools no longer hand back yesterday's read as today's.** Both key a call by its inputs so that a retry lands on the job the first call made, and the API remembers a key for a day: the same list sent hours later returned the old batch, with nothing saying so. The key now carries a ten-minute window, as `run_agent`'s does, so a later call reads again. A read made by an earlier call comes back with `reused: true` and `ageSeconds`, and `scrape_urls` takes `force_refresh=true` to read again now.
+- **A URL that did not come back ok says why in a list's `index` and `rest`**: its `reason` and `errorCode` beside its status. A name that does not resolve reads `missing`, as a 404 does; `errorCode: DNS_FAILED` and the reason are what tell them apart, and an index row carried neither.
 - `map_site`'s `sections` come from the whole map, not only the `limit` URLs it returns: ten URLs of a 1,485-URL site named one section.
 - The MCP server says its version in the handshake (`serverInfo.version`, the package's); it said `""`.
 - The MCP `scrape_urls` tool says why a short page can cost 4 credits: the API renders it once to see what its scripts add (example.com adds its notice in five languages) and keeps the render when they add text; `config={"render_js": "never"}` reads only what the server sent, at 1.
