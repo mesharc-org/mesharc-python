@@ -1036,7 +1036,9 @@ def _safe(fn):
                   "lists the keys. full=true reads one URL in full and runs config.actions first, e.g. [{\"type\": "
                   "\"click\", \"selector\": \"#load-more\", \"repeat\": \"until_gone\"}].\n"
                   "Cost: 1 credit for a plain fetch, 4 with a browser, +1 for a screenshot. A page the site refuses "
-                  "is reported as blocked and is free.\n"
+                  "is reported as blocked and is free. A short page is rendered once to see what its scripts add "
+                  "(example.com adds five languages), and kept at 4 when they add text; config {\"render_js\": "
+                  "\"never\"} reads only what the server sent, at 1.\n"
                   "Lists: a list runs as one batch. If it outlasts the connection's time limit, a job comes back "
                   "for get_job, and sending the same list again returns that batch.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
