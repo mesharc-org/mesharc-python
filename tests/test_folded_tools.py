@@ -162,7 +162,7 @@ def test_list_projects_gives_pages_as_a_number(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_client", lambda: c)
     c.billing = lambda: {"plan": {"name": "free"}, "month": {}}
     rows = mcp_mod.list_projects()["projects"]
-    assert [r["pages"] for r in rows] == [1284, "8"], "a number where the API gives one; an older API's text as is"
+    assert [r["pages"] for r in rows] == [1284, 8], "the API's number where it gives one; else its text, read as one"
 
 
 def test_map_site_passes_on_why_a_map_is_empty(monkeypatch):

@@ -227,7 +227,7 @@ class ProjectOut(TypedDict, total=False):
     config: Annotated[Any, Field(description=(
         "Its settings as {key: value}; secrets such as chat_url come back masked."))]
     retention: Annotated[Any, Field(description="How long runs are kept, e.g. '90d'.")]
-    pagesN: Annotated[Any, Field(description="Pages its last finished run read.")]
+    pages: Annotated[Any, Field(description="Pages its last finished run read, a number.")]
     coverage: Annotated[Any, Field(description=(
         "Percent of the site the last run reached; under 90 means removals are withheld."))]
     status: Annotated[Any, Field(description=(
@@ -294,9 +294,10 @@ class RunOut(TypedDict, total=False):
     queued: Annotated[Any, Field(description="true while it waits for a worker.")]
     trigger: Annotated[Any, Field(description="manual, scheduled, api or recrawl.")]
     scope: Annotated[Any, Field(description="How many URLs a start_run with urls listed; 0 for a full run.")]
-    pagesN: Annotated[Any, Field(description="Pages read so far.")]
-    changedN: Annotated[Any, Field(description=(
-        "Pages added, modified or removed against the run before; null until compared."))]
+    pages: Annotated[Any, Field(description="Pages read so far, a number.")]
+    changed: Annotated[Any, Field(description=(
+        "Pages added, modified or removed against the run before, a number; null until compared."))]
+    errors: Annotated[Any, Field(description="Pages refused or failed, a number.")]
     counts: Annotated[Any, Field(description="Pages by outcome, e.g. {ok, blocked, error}.")]
     coverage: Annotated[Any, Field(description="Percent of the known site this run reached.")]
     stop: Annotated[Any, Field(description="Why it ended, e.g. the credit budget; empty while running.")]
@@ -313,7 +314,7 @@ class RunOut(TypedDict, total=False):
 class RunsOut(TypedDict, total=False):
     """A project's runs, newest first."""
     runs: Annotated[Any, Field(description=(
-        "Each {id, status, trigger, scope, pagesN, changedN, counts, coverage, stop, startedAt, elapsed, baseline, "
+        "Each {id, status, trigger, scope, pages, changed, errors, counts, coverage, stop, startedAt, elapsed, baseline, "
         "rebaselined}; baseline is a first run with nothing to compare, rebaselined one whose settings changed how "
         "pages read, so it was recorded rather than compared."))]
     error: Annotated[Any, Field(description=_ERR)]
@@ -680,6 +681,45 @@ def _trim_page(p):
         if "fingerprint" in p:
             p.setdefault("settingsFingerprint", p.pop("fingerprint"))
     return p
+
+
+def _as_count(text):
+    """A count the API wrote for a screen ("1,284") as the number it is; None
+    for the dash that stands for "nothing to compare" and for anything else."""
+    if isinstance(text, bool):
+        return None
+    if isinstance(text, (int, float)):
+        return text
+    digits = str(text or "").replace(",", "").strip()
+    return int(digits) if digits.isdigit() else None
+
+
+# A run's and a project's counts: the name an assistant reads, and the API's
+# numeric twin of it where it has one.
+_COUNTS = (("pages", "pagesN"), ("changed", "changedN"), ("errors", "errorsN"), ("credits", "creditsN"))
+
+
+def _counts(row):
+    """A run or a project with its counts as numbers under their plain names.
+
+    The API's `pages`, `changed`, `errors` and `credits` are what its screens
+    print -- "1,284", and a dash for nothing to compare -- with the number
+    beside some of them as `pagesN`. An assistant got both, and a string
+    where a count was expected (MCP re-test, 11 Nov 2026). One name, one
+    type: the number, or null. A value that is not a count (a crawl's `pages`
+    is its list of pages) is left as it is.
+    """
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+    for plain, twin in _COUNTS:
+        if twin in out:
+            out[plain] = out.pop(twin)
+        elif isinstance(out.get(plain), str):
+            out[plain] = _as_count(out[plain])
+    if isinstance(out.get("lastRun"), dict):
+        out["lastRun"] = _counts(out["lastRun"])
+    return out
 
 
 def _index_row(p):
@@ -1874,7 +1914,7 @@ def list_projects() -> ProjectsOut:
         # was expected (MCP testing, 10 Nov 2026).
         out: dict = {"projects": [
             {**{k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "coverage", "lastRun", "status")},
-             "pages": p.get("pagesN", p.get("pages"))}
+             "pages": _counts(p).get("pages")}
             for p in s.projects.list()]}
         # The balance rides along so an assistant can check it before a
         # large crawl rather than learn it from a 402. It is an extra: no
@@ -2001,7 +2041,7 @@ def get_project(project_id: Annotated[str | None, Field(
                     "note": "include_paths and exclude_paths are globs over the URL path: '/blog/*' is the blog section "
                             "(its index included), '/blog/' is one page. To limit a project to a section, set include_paths "
                             "and nothing else; sitemap_include is for choosing among sitemap files, not pages."}
-    return _safe(go)
+    return _counts(_safe(go))
 
 
 @tool(title="Create a watched project",
@@ -2060,7 +2100,7 @@ def create_project(seed: Annotated[str | None, Field(
                 # project it became, which changes nothing it stored.
                 return s.projects.update(kept["id"], config=caps) if caps and kept.get("id") else kept
             return s.projects.create(seed, name=name, schedule=schedule, config={**(config or {}), **caps} or None)
-    return _safe(go)
+    return _counts(_safe(go))
 
 
 @tool(title="Update a project's settings",
@@ -2115,7 +2155,7 @@ def update_project(project_id: ProjectId,
                         raise
                     out["webhookTest"] = {"error": exc.detail, "status": exc.status}
             return out
-    return _safe(go)
+    return _counts(_safe(go))
 
 
 # Said when the key behind a call is not an admin's. A connected app never is:
@@ -2201,12 +2241,12 @@ def start_run(project_id: ProjectId,
         except MeshArcTimeoutError as exc:
             return _still_running("run", getattr(exc, "job_id", "") or "",
                                   project_id=project_id)
-    return _safe(go)
+    return _counts(_safe(go))
 
 
 # A run as list_runs shows it: what an assistant needs to pick one, without
 # the config, link graph and engine profile a run record also carries.
-RUN_FIELDS = ("id", "status", "trigger", "scope", "pagesN", "changedN", "counts", "coverage", "stop",
+RUN_FIELDS = ("id", "status", "trigger", "scope", "pages", "changed", "errors", "counts", "coverage", "stop",
               "startedAt", "elapsed", "baseline", "rebaselined")
 
 
@@ -2228,7 +2268,7 @@ def list_runs(project_id: ProjectId,
     the tools that read a run take one, and get_project shows only the last."""
     def go():
         rows = _client().runs.list(project_id, limit=max(1, min(limit, 100)))
-        return {"runs": [{k: r.get(k) for k in RUN_FIELDS} for r in rows]}
+        return {"runs": [{k: r.get(k) for k in RUN_FIELDS} for r in map(_counts, rows)]}
     return _safe(go)
 
 
@@ -2378,7 +2418,7 @@ def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search", "agent"],
             run = s.runs.get(project_id, id)
             if _running(run.get("status")) or run.get("queued"):
                 return _still_running("run", id, run.get("counts"), project_id=project_id)
-            return run
+            return _counts(run)
         if kind == "batch":
             return _batch_result(s.batch(id))
         if kind == "search":

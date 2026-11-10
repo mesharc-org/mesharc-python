@@ -48,6 +48,7 @@ All notable changes to this package are recorded here. The format follows
 
 ### Changed
 
+- **The MCP tools give a run's and a project's counts as numbers, under one name each.** `pages`, `changed` and `errors` are numbers (`changed` is null until a run is compared) in `start_run`, `list_runs`, `get_job` for a run, `get_project`, `create_project` and `update_project`, and a project's `lastRun`; a project's `credits` is null rather than a dash. The API's display text (`"1,284"`, `"—"`) no longer comes through beside them, and `pagesN` and `changedN` are gone from these answers: **read `pages` and `changed` instead**. The client's own methods return the API's rows unchanged.
 - `scrape_urls(full=true)` returns only the settings the call set as `config`, not all of about a hundred; `get_project` with no `project_id` lists them all.
 - A page from the MCP tools names its settings' fingerprint `settingsFingerprint` -- the same on every page read alike -- in place of `fingerprint`, which read as the page's own. `contentHash` is the page's own.
 - `list_projects` gives each project's `pages` as a number (the API's `pagesN`), not the list's display text.
