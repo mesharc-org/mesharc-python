@@ -124,8 +124,8 @@ Schedule = Literal["manual", "hourly", "daily", "weekly"]
 FetchConfig = Annotated[dict | None, Field(
     description="Fetch settings to override, as {key: value}; omit for the defaults.")]
 ParseDocuments = Annotated[bool, Field(
-    description="Read PDF, Word and spreadsheet URLs as text (default true). A parse_documents key in config "
-                "wins.")]
+    description="Read PDF (a scanned one by OCR) and Word (.docx) URLs as text (default true). A "
+                "parse_documents key in config wins.")]
 
 
 # What each tool answers, as output schemas. Every field is optional and any
@@ -906,7 +906,7 @@ def _shape_batch(base, rows, reserve):
 
 
 def _with_documents(config, parse_documents):
-    """A PDF, a Word file or a spreadsheet handed to an assistant should be
+    """A PDF or a Word file handed to an assistant should be
     read, not reported as skipped: documents are parsed unless the caller
     says otherwise or the config already decides."""
     cfg = dict(config or {})
@@ -1789,7 +1789,8 @@ CONFIG_GUIDE = {
     "exclude_tags": "CSS selectors to drop, e.g. ['.comments', '#newsletter']",
     "min_words": "pages shorter than this are recorded but not compared (0 = keep all)",
     "languages": "list of language codes to keep, e.g. ['en']; empty = all",
-    "parse_documents": "true reads PDFs, Word and spreadsheet files the crawl meets",
+    "parse_documents": "true reads the PDFs (a scanned one by OCR, its first 30 pages) and Word (.docx) files "
+                       "the crawl meets; other Office files are recorded as seen, not read",
     "respect_robots": "obey robots.txt (default true)",
     "allow_subdomains": "follow links to subdomains of the seed's domain",
     "use_proxy": "route through the residential exits (costs more; for walled sites)",
@@ -1807,6 +1808,8 @@ CONFIG_GUIDE = {
                    "max_output_tokens 0 = sized to the schema (default) else 200-16000",
     "webhook_url": "where to POST run and change events",
     "webhook_events": "which events to send, e.g. ['run.finished', 'page.changed']",
+    "webhook_include": "['markdown'] puts each added or modified page's markdown in page.changed (about 1 MB "
+                       "a message, the rest by a contentUrl); not sent to subscriptions; [] = off (default)",
     "notify_min_words": "a change smaller than this many words is not notified",
     "chat_url": "a Slack, Discord, Teams, Mattermost or Google Chat incoming-webhook URL: the run record is posted "
                 "there when a run finds something (never when nothing changed). Read back masked; sending the "
