@@ -432,6 +432,9 @@ def test_the_server_answers_a_real_call_as_the_caller_who_sent_it(served):
     built from that same token."""
     sid, hello = _session(served)
     assert hello["result"]["serverInfo"]["name"]
+    # The package's version, not "" (MCP testing, 10 Nov 2026).
+    from mesharc import __version__
+    assert hello["result"]["serverInfo"]["version"] == __version__ != ""
 
     r, listed = _rpc(served, "tools/list", session=sid)
     assert r.status_code == 200, r.text

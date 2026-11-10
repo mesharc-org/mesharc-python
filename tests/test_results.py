@@ -169,7 +169,8 @@ def test_one_page_asked_for_alone_is_not_rationed():
     full = mcp_mod._trim_page(_page(0, links=3, chars=500))
     assert full["markdown"] == "m" * 500
     assert isinstance(full["links"], list), "one page keeps its links"
-    assert full["fingerprint"] == "f" * 64
+    # The settings' fingerprint, under the name that says so (10 Nov 2026).
+    assert full["settingsFingerprint"] == "f" * 64 and "fingerprint" not in full
 
 
 # --- the two ways to drill in --------------------------------------------

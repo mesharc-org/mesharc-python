@@ -139,6 +139,42 @@ def test_full_reads_one_page_through_the_extract_call(client):
     assert "cap for one page" in out["page"]["markdown"]
 
 
+def test_full_returns_only_the_settings_the_call_set(monkeypatch):
+    """Caught in MCP testing (10 Nov 2026): full=true answered with all ~100
+    settings, most of them defaults nobody asked about."""
+    class _Full(_Client):
+        def extract(self, url, config=None):
+            self.calls.append(("extract", url, config))
+            every = {f"key_{i}": i for i in range(100)}
+            return {"id": "x1", "status": "done", "config": {**every, "render_js": "always", "parse_documents": True},
+                    "page": {"url": url, "markdown": "m", "fingerprint": "f" * 16}}
+    c = _Full()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.scrape_urls(["https://example.com/a"], full=True, config={"render_js": "always"})
+    assert out["config"] == {"render_js": "always", "parse_documents": True}
+    assert out["page"]["settingsFingerprint"] == "f" * 16 and "fingerprint" not in out["page"]
+
+
+def test_list_projects_gives_pages_as_a_number(monkeypatch):
+    """Caught in MCP testing (10 Nov 2026): `pages` was the list's display text."""
+    c = _Client()
+    c.projects.list = lambda: [{"id": "p1", "pages": "1,284", "pagesN": 1284}, {"id": "p2", "pages": "8"}]
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    c.billing = lambda: {"plan": {"name": "free"}, "month": {}}
+    rows = mcp_mod.list_projects()["projects"]
+    assert [r["pages"] for r in rows] == [1284, "8"], "a number where the API gives one; an older API's text as is"
+
+
+def test_map_site_passes_on_why_a_map_is_empty(monkeypatch):
+    class _Empty(_Client):
+        def map_details(self, url, search=None, limit=None):
+            return {"url": url, "method": "", "totals": {"files": 0, "urls": 0}, "data": [],
+                    "note": "no sitemap found: robots.txt and the well-known paths declare none"}
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Empty())
+    out = mcp_mod.map_site("https://none.test/")
+    assert out["urls"] == [] and out["note"].startswith("no sitemap found")
+
+
 def test_full_refuses_a_list_rather_than_reading_one_of_it(client):
     out = mcp_mod.scrape_urls(["https://example.com/a", "https://example.com/b"], full=True)
     assert out["code"] == "validation" and client.calls == []
@@ -206,6 +242,40 @@ def test_unreadable_deliveries_do_not_cost_the_project(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_client", lambda: c)
     out = mcp_mod.get_project("p1")
     assert out["id"] == "p1" and out["webhooks"]["deliveries"] is None and "could not be read" in out["webhooks"]["note"]
+
+
+# -- map_site: the site's shape from the whole map, not the `limit` shown ------------
+
+class _Mapped(_Client):
+    """A map of a docs site: its URLs, each with the sitemap file's section."""
+
+    def map_details(self, url, search=None, limit=None):
+        self.calls.append(("map", url, search, limit))
+        urls = (["https://docs.x/"] + [f"https://docs.x/es/p{i}" for i in range(12)]
+                + [f"https://docs.x/api-reference/e{i}" for i in range(30)]
+                + [f"https://docs.x/features/f{i}" for i in range(5)] + ["https://docs.x/sdks"])
+        data = [{"url": u, "section": "es" if "/es/" in u else ("api" if "/api-reference/" in u else "")}
+                for u in urls]
+        return {"url": url, "method": "robots", "totals": {"urls": len(urls)}, "data": data[:limit]}
+
+
+def test_map_site_describes_the_whole_site_whatever_limit_shows(monkeypatch):
+    """Caught in MCP testing (10 Nov 2026): limit=10 on a 1,485-URL site said its
+    only section was "es". The site is read whole for its shape; limit cuts the list."""
+    c = _Mapped()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.map_site("https://docs.x/", limit=10)
+    assert c.calls == [("map", "https://docs.x/", None, mcp_mod.MAP_READ)]
+    assert len(out["urls"]) == 10 and out["urls"][0] == "https://docs.x/"
+    assert out["sections"] == ["api", "es"]
+    assert out["paths"] == [{"path": "/api-reference", "urls": 30}, {"path": "/es", "urls": 12},
+                            {"path": "/features", "urls": 5}, {"path": "/", "urls": 1}, {"path": "/sdks", "urls": 1}]
+
+
+def test_map_site_names_at_most_thirty_paths(monkeypatch):
+    many = [f"https://x.test/s{i:02d}/p" for i in range(40)]
+    assert len(mcp_mod._paths(many)) == mcp_mod.PATHS_CAP == 30
+    assert mcp_mod._paths([]) == []
 
 
 # -- list_projects: the balance rides along ------------------------------------------

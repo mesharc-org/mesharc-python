@@ -871,9 +871,15 @@ class Crawl:
         return self._h("GET", f"/crawl/{self.id}/page", params={"url": url})
 
     def keep(self, name: Optional[str] = None, schedule: Optional[str] = None,
-             retention: Optional[str] = None) -> Json:
-        """Make this one-shot crawl a project. Its run and pages are already in place."""
-        body = {k: v for k, v in (("name", name), ("schedule", schedule), ("retention", retention)) if v}
+             retention: Optional[str] = None, max_pages: Optional[int] = None) -> Json:
+        """Make this one-shot crawl a project. Its run and pages are already in place.
+
+        The project's page cap is ``max_pages``, or a project's default within
+        the plan -- not the crawl's ``limit``, which was how much to read once.
+        An API from before 10 Nov 2026 keeps the crawl's limit and ignores
+        ``max_pages``."""
+        body = {k: v for k, v in (("name", name), ("schedule", schedule), ("retention", retention),
+                                  ("maxPages", max_pages)) if v}
         return self._h("POST", f"/crawl/{self.id}/keep", json=body)
 
     def cancel(self) -> Json:
