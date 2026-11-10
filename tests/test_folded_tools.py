@@ -139,6 +139,42 @@ def test_full_reads_one_page_through_the_extract_call(client):
     assert "cap for one page" in out["page"]["markdown"]
 
 
+def test_full_returns_only_the_settings_the_call_set(monkeypatch):
+    """Caught in MCP testing (10 Nov 2026): full=true answered with all ~100
+    settings, most of them defaults nobody asked about."""
+    class _Full(_Client):
+        def extract(self, url, config=None):
+            self.calls.append(("extract", url, config))
+            every = {f"key_{i}": i for i in range(100)}
+            return {"id": "x1", "status": "done", "config": {**every, "render_js": "always", "parse_documents": True},
+                    "page": {"url": url, "markdown": "m", "fingerprint": "f" * 16}}
+    c = _Full()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.scrape_urls(["https://example.com/a"], full=True, config={"render_js": "always"})
+    assert out["config"] == {"render_js": "always", "parse_documents": True}
+    assert out["page"]["settingsFingerprint"] == "f" * 16 and "fingerprint" not in out["page"]
+
+
+def test_list_projects_gives_pages_as_a_number(monkeypatch):
+    """Caught in MCP testing (10 Nov 2026): `pages` was the list's display text."""
+    c = _Client()
+    c.projects.list = lambda: [{"id": "p1", "pages": "1,284", "pagesN": 1284}, {"id": "p2", "pages": "8"}]
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    c.billing = lambda: {"plan": {"name": "free"}, "month": {}}
+    rows = mcp_mod.list_projects()["projects"]
+    assert [r["pages"] for r in rows] == [1284, "8"], "a number where the API gives one; an older API's text as is"
+
+
+def test_map_site_passes_on_why_a_map_is_empty(monkeypatch):
+    class _Empty(_Client):
+        def map_details(self, url, search=None, limit=None):
+            return {"url": url, "method": "", "totals": {"files": 0, "urls": 0}, "data": [],
+                    "note": "no sitemap found: robots.txt and the well-known paths declare none"}
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Empty())
+    out = mcp_mod.map_site("https://none.test/")
+    assert out["urls"] == [] and out["note"].startswith("no sitemap found")
+
+
 def test_full_refuses_a_list_rather_than_reading_one_of_it(client):
     out = mcp_mod.scrape_urls(["https://example.com/a", "https://example.com/b"], full=True)
     assert out["code"] == "validation" and client.calls == []

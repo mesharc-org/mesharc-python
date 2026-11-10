@@ -666,6 +666,12 @@ def _trim_page(p):
                     f"\n… [{len(p[k]) - MARKDOWN_CAP} more characters; "
                     f"{MARKDOWN_CAP:,} is the cap for one page]")
         p.pop("response", None)
+        # How the markdown was made -- the same on every page read alike --
+        # under the name that says so: as `fingerprint` it read as the page's
+        # own and looked broken (MCP testing, 10 Nov 2026). `contentHash` is
+        # the page's own.
+        if "fingerprint" in p:
+            p.setdefault("settingsFingerprint", p.pop("fingerprint"))
     return p
 
 
@@ -1056,6 +1062,12 @@ def scrape_urls(urls: Annotated[list[str], Field(
                 if r.get("page"):
                     r["page"] = _trim_page(r["page"])
                     r["page"].pop("links", None)
+                # The run's settings are every key with its value, about a
+                # hundred, most of them defaults nobody asked about: only the
+                # ones this call set come back (MCP testing, 10 Nov 2026).
+                # get_project with no project_id lists them all.
+                if isinstance(r.get("config"), dict):
+                    r["config"] = {k: v for k, v in r["config"].items() if k in (cfg or {})}
                 return r
         # A key of our own, so a retry -- the client's on a dropped
         # connection, the assistant's on a 429 -- lands on the same job.
@@ -1109,7 +1121,10 @@ def map_site(url: Annotated[str, Field(description="Any URL on the site, usually
             return {"url": out["url"], "method": out["method"], "totals": out["totals"],
                     "urls": urls[:max(1, min(limit, MAP_READ))],
                     "sections": sorted({u.get("section", "") for u in out["data"] if u.get("section")}),
-                    "paths": _paths(urls)}
+                    "paths": _paths(urls),
+                    # Why a map came back empty, when the API says (no
+                    # sitemap declared); absent from an older API.
+                    **({"note": out["note"]} if out.get("note") else {})}
     return _safe(go)
 
 
@@ -1773,9 +1788,12 @@ def get_monitor_rows(monitor_id: MonitorId,
 def list_projects() -> ProjectsOut:
     def go():
         s = _client()
+        # `pages` as the number it is: the API's own `pages` is the list's
+        # display text ("1,284"), which read as a string field where a count
+        # was expected (MCP testing, 10 Nov 2026).
         out: dict = {"projects": [
-            {k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "pages", "coverage", "lastRun",
-                                   "status")}
+            {**{k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "coverage", "lastRun", "status")},
+             "pages": p.get("pagesN", p.get("pages"))}
             for p in s.projects.list()]}
         # The balance rides along so an assistant can check it before a
         # large crawl rather than learn it from a 402. It is an extra: no
@@ -1913,7 +1931,9 @@ def get_project(project_id: Annotated[str | None, Field(
                   "list_projects first so the site is not added twice.\n"
                   "Inputs: seed starts a new project, e.g. 'example.com'. crawl_id instead keeps a crawl_site crawl "
                   "from the last day as the first run, with no second fetch; it keeps that crawl's settings, so "
-                  "config goes only with seed. The usual config keys are include_paths (one section, e.g. "
+                  "config goes only with seed -- except its page limit: the crawl's limit was how much to look at "
+                  "once, so the project gets a project's default (100, within the plan), which update_project "
+                  "changes. The usual config keys are include_paths (one section, e.g. "
                   "['/blog/*']), exclude_paths, max_pages and render_js; get_project with no project_id lists them "
                   "all.\n"
                   "Cost: creating reads robots.txt and the sitemaps but no pages, so it is free. Each run spends "
@@ -2140,9 +2160,11 @@ def list_runs(project_id: ProjectId,
                   "scrape_urls fetches a live copy, and get_changes lists only what changed.\n"
                   "Inputs: project_id from list_projects. q=\'free trial\' needs both words, q=\'\"free trial\"\' the "
                   "phrase; mode=\'selector\' takes CSS such as 'form#signup' and needs a run that kept html (the "
-                  "rawHtml format). url is an address, not a search term: scheme and trailing slash may differ, the "
-                  "rest must match, query string included. Give q or url, not both. run_id from list_runs picks "
-                  "the run.\n"
+                  "rawHtml format); a selector search names the pages it could not search. url is an address, not a "
+                  "search term: scheme and trailing slash may differ or be left out, and a path alone is the "
+                  "project's own site; the rest must match, query string included. Give q or url, not both. "
+                  "run_id from list_runs picks the run; empty is the latest full run, and a newer re-crawl of "
+                  "listed pages is named as newerPartialRun.\n"
                   "Limits: a listing has up to 500 rows, shallowest first, so use q to reach pages past them. A "
                   "page read in full has each body capped at 12,000 characters, and a URL the runs did not store "
                   "answers 404.\n"
@@ -2183,8 +2205,10 @@ def list_pages(project_id: ProjectId,
                   "shows every page whether or not it changed, and list_pages with url one page's text and "
                   "versions.\n"
                   "Inputs: project_id from list_projects. run_id from list_runs picks the run; empty means the "
-                  "latest finished run. against, another run's id from list_runs, compares the two directly instead "
-                  "of with the run just before. A run still going answers 409.\n"
+                  "latest finished full run -- a newer start_run re-crawl of listed pages is not the default, and "
+                  "is named as newerPartialRun with the id to pass as run_id. against, another run's id from "
+                  "list_runs, compares the two directly instead of with the run just before. A run still going "
+                  "answers 409.\n"
                   "Safeguards: removals are withheld when a run reached under 90% of the site, so a blocked crawl "
                   "never reports pages as gone. A project's first run is a baseline with nothing to compare.\n"
                   "Read-only and free: it reads stored data and never fetches.")

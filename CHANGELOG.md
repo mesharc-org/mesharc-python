@@ -48,6 +48,11 @@ All notable changes to this package are recorded here. The format follows
 
 ### Changed
 
+- `scrape_urls(full=true)` returns only the settings the call set as `config`, not all of about a hundred; `get_project` with no `project_id` lists them all.
+- A page from the MCP tools names its settings' fingerprint `settingsFingerprint` -- the same on every page read alike -- in place of `fingerprint`, which read as the page's own. `contentHash` is the page's own.
+- `list_projects` gives each project's `pages` as a number (the API's `pagesN`), not the list's display text.
+- `Crawl.keep(max_pages=...)` sets the kept project's page cap. Left out, an API with this change gives a project's default rather than the crawl's `limit`; `create_project(crawl_id=...)` says so.
+- `get_changes` and `list_pages` say that an empty `run_id` is the latest full run, and name a newer re-crawl of listed pages (`newerPartialRun`); `map_site` passes on why a map came back empty (`note`). **These need the API's fix**, on its feature branch.
 - Hosted, a tool holds a connection for up to 45 seconds by default (`MESHARC_MCP_WAIT`), not 25, before it hands back a job. A web search -- Google's results page rendered and its links resolved -- takes about 20 seconds, and under 25 every one came back as a job to poll.
 
 ### Fixed
