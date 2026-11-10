@@ -49,7 +49,7 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise SystemExit('The MCP server needs the "mcp" package: pip install "mesharc[mcp]"') from exc
 
-from mesharc import MeshArc, MeshArcError, MeshArcTimeoutError
+from mesharc import MeshArc, MeshArcError, MeshArcTimeoutError, __version__
 # The one place that decides whether a job is still going. Listing terminal
 # names here instead meant `error` was missed and failed crawls polled for ever.
 from mesharc import _running
@@ -175,6 +175,10 @@ class MapOut(TypedDict, total=False):
     urls: Annotated[Any, Field(description="The declared URLs, at most `limit`, filtered by `search`.")]
     sections: Annotated[Any, Field(description=(
         "The section names the sitemaps group URLs under, e.g. 'blog'; empty when there are none."))]
+    paths: Annotated[Any, Field(description=(
+        "The site by its first path segment, biggest first: [{path, urls}], e.g. {path: '/docs', urls: 412}, "
+        "'/' for the home page; up to 30, over the first 5,000 declared URLs whatever `limit` returned. What "
+        "include_paths on crawl_site or create_project would select."))]
     error: Annotated[Any, Field(description=_ERR)]
     status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
     code: Annotated[Any, Field(description=_CODE)]
@@ -550,7 +554,9 @@ def _build(**kw):
     arguments, and passing them here is what keeps this file off the SDK's
     private attributes.
     """
-    srv = MCPServer(NAME, instructions=INSTRUCTIONS, **kw)
+    # The version is the package's: left out, the handshake said "" (MCP
+    # testing, 10 Nov 2026), and a client cannot tell 0.6.0 from a dev build.
+    srv = MCPServer(NAME, instructions=INSTRUCTIONS, version=__version__, **kw)
     for fn, how in _TOOLS:
         srv.add_tool(fn, **how)
     return srv
@@ -572,9 +578,11 @@ class _Shared(MeshArc):
 # their own token, and no key of the server's own at all.
 _HTTP = False
 # What a tool may hold a connection for in hosted mode before it hands back a
-# job id instead. Many MCP hosts time a tool call out well before a minute, and
-# this server cannot know which one is calling.
-WAIT_DEFAULT_S = 25.0
+# job id instead. Many MCP hosts time a tool call out at a minute, and this
+# server cannot know which one is calling. 25 was too short for a web search:
+# Google's results page is rendered and its links resolved, about 20 seconds,
+# and every search came back as a job to poll (MCP testing, 10 Nov 2026).
+WAIT_DEFAULT_S = 45.0
 
 _CLIENT = None
 # Hosted mode: one client per caller, keyed by the hash of their token. The
@@ -1076,8 +1084,8 @@ def scrape_urls(urls: Annotated[list[str], Field(
       annotations=_acts(),
       description="List the URLs a site declares in its sitemaps (found through robots.txt and the well-known "
                   "paths, each index file walked to its children) without fetching any page.\n"
-                  "Use it first, to see how big a site is and what sections it has, before crawl_site or "
-                  "create_project. It cannot read content (scrape_urls and crawl_site do), and it misses pages a "
+                  "Use it first, to see how big a site is and what sections it has (paths counts its URLs by "
+                  "first path segment), before crawl_site or create_project. It cannot read content (scrape_urls and crawl_site do), and it misses pages a "
                   "site links to but does not declare.\n"
                   "Inputs: any page of the site works as url, since discovery starts at the root. search='/blog/' "
                   "keeps the blog's URLs; it is a plain case-insensitive substring, not a glob, applied before "
@@ -1092,11 +1100,35 @@ def map_site(url: Annotated[str, Field(description="Any URL on the site, usually
              = 1000) -> MapOut:
     def go():
         with _client() as s:
-            out = s.map_details(url, search=search, limit=min(limit, 5000))
+            # The site's shape needs more of it than the `limit` an assistant
+            # wants to see: ten URLs said a 1,485-URL site had one section
+            # (MCP testing, 10 Nov 2026). A map is charged per sitemap file,
+            # never per URL, so reading MAP_READ costs nothing more.
+            out = s.map_details(url, search=search, limit=MAP_READ)
+            urls = [u["url"] for u in out["data"]]
             return {"url": out["url"], "method": out["method"], "totals": out["totals"],
-                    "urls": [u["url"] for u in out["data"]],
-                    "sections": sorted({u.get("section", "") for u in out["data"] if u.get("section")})}
+                    "urls": urls[:max(1, min(limit, MAP_READ))],
+                    "sections": sorted({u.get("section", "") for u in out["data"] if u.get("section")}),
+                    "paths": _paths(urls)}
     return _safe(go)
+
+
+# map_site: how many declared URLs it reads to describe the site (the API's
+# own most), and how many path groups it names.
+MAP_READ = 5000
+PATHS_CAP = 30
+
+
+def _paths(urls):
+    """[{path, urls}] by first path segment, biggest first and then by name:
+    '/docs' for everything under /docs/, '/' for the home page itself."""
+    from urllib.parse import urlparse
+    counts: dict[str, int] = {}
+    for u in urls:
+        key = "/" + urlparse(u).path.strip("/").split("/", 1)[0]
+        counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"path": p, "urls": n} for p, n in ranked[:PATHS_CAP]]
 
 
 @tool(title="Crawl a whole site once",

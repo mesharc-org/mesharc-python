@@ -208,6 +208,40 @@ def test_unreadable_deliveries_do_not_cost_the_project(monkeypatch):
     assert out["id"] == "p1" and out["webhooks"]["deliveries"] is None and "could not be read" in out["webhooks"]["note"]
 
 
+# -- map_site: the site's shape from the whole map, not the `limit` shown ------------
+
+class _Mapped(_Client):
+    """A map of a docs site: its URLs, each with the sitemap file's section."""
+
+    def map_details(self, url, search=None, limit=None):
+        self.calls.append(("map", url, search, limit))
+        urls = (["https://docs.x/"] + [f"https://docs.x/es/p{i}" for i in range(12)]
+                + [f"https://docs.x/api-reference/e{i}" for i in range(30)]
+                + [f"https://docs.x/features/f{i}" for i in range(5)] + ["https://docs.x/sdks"])
+        data = [{"url": u, "section": "es" if "/es/" in u else ("api" if "/api-reference/" in u else "")}
+                for u in urls]
+        return {"url": url, "method": "robots", "totals": {"urls": len(urls)}, "data": data[:limit]}
+
+
+def test_map_site_describes_the_whole_site_whatever_limit_shows(monkeypatch):
+    """Caught in MCP testing (10 Nov 2026): limit=10 on a 1,485-URL site said its
+    only section was "es". The site is read whole for its shape; limit cuts the list."""
+    c = _Mapped()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.map_site("https://docs.x/", limit=10)
+    assert c.calls == [("map", "https://docs.x/", None, mcp_mod.MAP_READ)]
+    assert len(out["urls"]) == 10 and out["urls"][0] == "https://docs.x/"
+    assert out["sections"] == ["api", "es"]
+    assert out["paths"] == [{"path": "/api-reference", "urls": 30}, {"path": "/es", "urls": 12},
+                            {"path": "/features", "urls": 5}, {"path": "/", "urls": 1}, {"path": "/sdks", "urls": 1}]
+
+
+def test_map_site_names_at_most_thirty_paths(monkeypatch):
+    many = [f"https://x.test/s{i:02d}/p" for i in range(40)]
+    assert len(mcp_mod._paths(many)) == mcp_mod.PATHS_CAP == 30
+    assert mcp_mod._paths([]) == []
+
+
 # -- list_projects: the balance rides along ------------------------------------------
 
 def test_the_project_list_says_what_the_workspace_has_left(monkeypatch):
