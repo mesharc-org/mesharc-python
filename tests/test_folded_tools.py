@@ -318,6 +318,20 @@ def test_against_compares_two_runs_directly(monkeypatch):
     assert asked == [("p1", "r9", "r1")] and len(out["change"]["feed"]) == 200
 
 
+def test_get_changes_gives_its_runs_counts_as_numbers(monkeypatch):
+    """The same run shape as start_run and list_runs: numbers, or null for a
+    baseline's changed (MCP re-test 6: the screen's text came through)."""
+    class _Changes(_Client):
+        def changes(self, project_id, run_id=None, against=None):
+            return {"change": {}, "runs": [
+                {"id": "r2", "pages": "1,284", "pagesN": 1284, "changed": "1", "changedN": 1, "errors": "0", "errorsN": 0},
+                {"id": "r1", "pages": "2", "pagesN": 2, "changed": "—", "changedN": None, "errors": "0", "errorsN": 0}]}
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Changes())
+    runs = mcp_mod.get_changes("p1")["runs"]
+    assert [(r["pages"], r["changed"], r["errors"]) for r in runs] == [(1284, 1, 0), (2, None, 0)]
+    assert not any(k in r for r in runs for k in ("pagesN", "changedN", "errorsN"))
+
+
 # -- update_project(test_webhook=...) ---------------------------------------------
 
 def test_a_webhook_saved_and_tested_in_one_call_tests_the_new_url(client):
