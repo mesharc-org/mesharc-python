@@ -6,6 +6,11 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **A search no engine answered is `no_results`**, which `web_search()` returns rather than raises and the MCP `search_web` tool shows with its `attempts`; an API before 11 Nov 2026 says `blocked` for the same, and both are read. **Upgrade before the API that sends `no_results`**: 0.7.0 raises `MeshArcError` 502 on it.
+- **A page whose site does not exist is `unreachable`** (`errorCode` `DNS_FAILED`) in the MCP tools' descriptions and answers; `missing` stays a page the site says it does not have.
+
 ## 0.7.0 - 2026-11-11
 
 The agent features below -- runs, follow-ups, agent tables, agent monitors, and triggers that start an agent run -- need a deployment that runs agents. mesharc.dev does not yet: it refuses them with 501 `agents_unavailable`, which the client raises as `MeshArcError` and the MCP tools return as `{"code": "agents_unavailable"}`.

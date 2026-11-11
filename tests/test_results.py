@@ -528,6 +528,16 @@ def test_ten_scraped_results_stay_inside_the_budget(monkeypatch):
     assert "idempotency_key" not in kw, "a repeat search is a new search by design"
 
 
+def test_a_search_with_no_results_says_why(monkeypatch):
+    nothing = _search(status="no_results", error="google asked for javascript; bing answered with nothing matching",
+                      attempts=[{"engine": "google", "ok": False}, {"engine": "bing", "ok": False}])
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(nothing))
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    out = mcp_mod.search_web("q")
+    assert out["status"] == "no_results" and out["results"] == []
+    assert out["attempts"] == nothing["attempts"], "the attempts say why, as for an older API's blocked"
+
+
 def test_a_blocked_search_says_how_it_was_refused(monkeypatch):
     blocked = _search(status="blocked", error="every engine refused the results page",
                       attempts=[{"engine": "google", "status": 429}, {"engine": "bing", "status": 403}])
