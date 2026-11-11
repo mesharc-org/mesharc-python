@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-11
+
 The agent features below -- runs, follow-ups, agent tables, agent monitors, and triggers that start an agent run -- need a deployment that runs agents. mesharc.dev does not yet: it refuses them with 501 `agents_unavailable`, which the client raises as `MeshArcError` and the MCP tools return as `{"code": "agents_unavailable"}`.
 
 ### Added
