@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.2 - 2026-11-11
+
 ### Fixed
 
 - **The MCP `get_changes` tool gives its runs' counts as numbers**, as `start_run`, `list_runs` and `get_project` do: `pages`, `changed` and `errors` are numbers (`changed` null for a baseline), without the display text and the `pagesN` twins beside them.
