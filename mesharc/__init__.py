@@ -23,6 +23,7 @@ raises ``MeshArcTimeoutError``.
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import time
@@ -42,6 +43,27 @@ DEFAULT_MAX_RETRIES = 2
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
 
 Json = Dict[str, Any]
+
+# Where the client says what a limit kept from an answer (_tell). A warning,
+# so it shows with no logging set up;
+# logging.getLogger("mesharc").setLevel(logging.ERROR) quiets it.
+_log = logging.getLogger("mesharc")
+
+
+def _tell(answer: Any) -> Any:
+    """Log what a limit kept from an answer the client waited for: each of
+    its ``notices`` (a crawl, scrape, batch or search), or else one page's
+    ``limit``, by their ``message``. The fields stay in the answer, which is
+    returned as it came."""
+    if isinstance(answer, dict):
+        lines = [n.get("message") for n in answer.get("notices") or [] if isinstance(n, dict)]
+        limit = answer.get("limit")
+        if not lines and isinstance(limit, dict):
+            lines = [limit.get("message")]
+        for line in lines:
+            if line:
+                _log.warning("%s", line)
+    return answer
 
 
 class MeshArcError(Exception):
@@ -805,6 +827,7 @@ class Crawl:
         #: Returned once, at creation: the secret the crawl's webhook messages are signed with.
         self.webhook_secret: str = envelope.get("webhookSecret", "")
         self.envelope: Json = envelope
+        self._told = False
 
     def __repr__(self) -> str:
         return f"<Crawl {self.id[:8]} {self.url} {self.envelope.get('status')}>"
@@ -813,17 +836,32 @@ class Crawl:
     def status(self) -> str:
         return self.envelope.get("status", "queued")
 
+    @property
+    def notices(self) -> List[Json]:
+        """What a limit kept from this crawl, a line per reason: ``{code,
+        reason, pages, needs, examples, unlockedBy, upgradeUrl, message}``.
+        Empty when nothing was held back (or from an API before 10 Nov 2026).
+        Each page a limit stopped also carries its own ``limit``."""
+        return list(self.envelope.get("notices") or [])
+
+    def _tell_once(self) -> None:
+        if not self._told and not _running(self.envelope.get("status")):
+            self._told = True
+            _tell(self.envelope)
+
     def refresh(self, formats: str = "markdown") -> Json:
         """The envelope as it stands now, without its pages."""
         self.envelope = self._h("GET", f"/crawl/{self.id}", params={"limit": 1, "formats": formats})
         return self.envelope
 
     def wait(self, poll: float = 3.0, timeout: float = 3600, formats: str = "markdown") -> Json:
-        """Block until the crawl finishes. Returns the envelope."""
+        """Block until the crawl finishes. Returns the envelope; what a limit
+        held back is logged once (see ``notices``)."""
         deadline = time.time() + timeout
         while True:
             e = self.refresh(formats)
             if not _running(e["status"]):
+                self._tell_once()
                 return e
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"crawl {self.id} is still {e['status']} after {timeout}s", self.id)
@@ -855,6 +893,8 @@ class Crawl:
                 cursor = _cursor_of(page["next"]) or cursor
                 continue
             if not wait or not _running(page["status"]):
+                if wait:
+                    self._tell_once()
                 return
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"crawl {self.id} is still {page['status']} after {timeout}s", self.id)
@@ -1199,7 +1239,11 @@ class MeshArc:
         deadline = time.time() + timeout
         while True:
             if out.get("status") == "done":
-                return (out.get("data") or [{}])[0]
+                page = (out.get("data") or [{}])[0]
+                # The answer's notices, or the page's own limit, are logged:
+                # only the page is returned, with its `limit`.
+                _tell(out if out.get("notices") else page)
+                return page
             if not _running(out.get("status")):
                 raise MeshArcError(502, out.get("error") or f"scrape {out.get('status')}", "job_failed")
             if time.time() >= deadline:
@@ -1210,12 +1254,15 @@ class MeshArc:
 
     def batch(self, batch_id: str, formats: str = "markdown", wait: bool = False, poll: float = 3.0,
               timeout: float = 3600) -> Json:
-        """A batch started earlier. With ``wait``, returns once every row is in."""
+        """A batch started earlier. With ``wait``, returns once every row is in,
+        and logs what a limit held back (the batch's ``notices``)."""
         deadline = time.time() + timeout
         while True:
             r = self._h("GET", f"/scrape/{batch_id}", params={"formats": formats})
-            if not wait or not _running(r["status"]):
+            if not wait:
                 return r
+            if not _running(r["status"]):
+                return _tell(r)
             if time.time() >= deadline:
                 raise MeshArcTimeoutError(f"batch {batch_id} is still {r['status']} after {timeout}s", batch_id)
             time.sleep(poll)
@@ -1337,7 +1384,7 @@ class MeshArc:
         deadline = time.time() + timeout
         while True:
             if out.get("status") in ("done", "blocked"):
-                return out
+                return _tell(out)
             if not _running(out.get("status")):
                 raise MeshArcError(502, out.get("error") or f"search {out.get('status')}", "job_failed")
             if time.time() >= deadline:
@@ -1562,11 +1609,15 @@ class MeshArc:
         self._h("DELETE", f"/me/keys/{key_id}")
 
     def usage(self) -> Json:
+        """This month's pages and credits by day and by engine. ``credits.stealth``
+        is the free plan's stealth trial, ``{limit, used, left}`` in credits over
+        the workspace's life; None when stealth is not capped."""
         return self._h("GET", "/me/usage")
 
     def billing(self) -> Json:
         """The plan, this month's spend and what is left to spend
-        (``month.remaining``, None for no limit), and the charges behind it."""
+        (``month.remaining``, None for no limit), and the charges behind it.
+        ``month.stealth`` is the stealth trial, as on ``usage()``."""
         return self._h("GET", "/me/billing")
 
     def monitor(self) -> Json:
