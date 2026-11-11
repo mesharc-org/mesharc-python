@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.1 - 2026-11-11
+
 ### Changed
 
 - **A search no engine answered is `no_results`**, which `web_search()` returns rather than raises and the MCP `search_web` tool shows with its `attempts`; an API before 11 Nov 2026 says `blocked` for the same, and both are read. **Upgrade before the API that sends `no_results`**: 0.7.0 raises `MeshArcError` 502 on it.
