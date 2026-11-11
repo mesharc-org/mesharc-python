@@ -7,7 +7,7 @@ The Python client for the [MeshArc](https://mesharc.dev) API: a URL in, clean co
 - **Map** what a site declares in its sitemaps before fetching any of it.
 - **Search** the web for pages whose URLs you do not know, and read each result's page in the same call.
 - **Ask** the agent a question: it searches, reads pages and answers, in the shape of a schema if you give one, with the pages its answer rests on. (Not live on mesharc.dev yet.)
-- **Monitor** a search or a question: asked again hourly, daily or weekly, each answer compared with the last, a webhook told when it changed. (Not live on mesharc.dev yet.)
+- **Monitor** a search or a question: asked again hourly, daily or weekly, each answer compared with the last, a webhook told when it changed. (A question needs the agent, which mesharc.dev does not run yet.)
 - **Watch** a site over time: projects, scheduled runs, and a change record — pages added, removed, modified, field by field.
 
 Python 3.10 or newer. One dependency (`httpx`). Fully typed.
@@ -170,7 +170,7 @@ more = arc.web_search("python packaging guide", page=2)               # results 
 
 `web_search` waits for the results and returns the whole envelope, the hits under `data`. A search is `queued`, `running`, `done`, `blocked` or `error`: `blocked` — every engine refused — is returned, not raised; `error` raises `MeshArcError`. A search that scrapes stays `running` until its pages land. `scrape=` also takes a dict, sent as given (`{"formats": ["markdown", "links"], "maxCredits": 20}`); `country=` and `lang=` say where and in what language to search; `wait=False` returns at once, and `timeout_s` is how long the API holds the request (60 s by default, 120 at most) before the client polls.
 
-`news=True` searches the engines' news results rather than the web's (one or the other per search); each news hit also carries `publisher` and `age`, as the engine put it (`"20h"`). `page=` is which results page, 1 to 10: page 2 is results 11–20, and each page is its own search with its own charge. **`news=` and `page=` need an API with those features**: they are on the API's feature branch, not yet on mesharc.dev.
+`news=True` searches the engines' news results rather than the web's (one or the other per search); each news hit also carries `publisher` and `age`, as the engine put it (`"20h"`). `page=` is which results page, 1 to 10: page 2 is results 11–20, and each page is its own search with its own charge.
 
 A search needs a key that can write, and it spends credits. The results page costs the engine that read it; a results page every engine refused is free. An equal search — same query, `news`, `page`, `country`, `lang`, `freshness` and domains — within an hour of a finished one (ten minutes for news) comes from the cache (`cached` is true) with no charge for the results page. Scraped pages are charged, cached or not.
 
@@ -178,7 +178,7 @@ A search needs a key that can write, and it spends credits. The results page cos
 
 ## Asking the agent
 
-**The agent route (`/agent`) is not live on mesharc.dev yet**; web search is. The client and the MCP tools are ready for it. The agent's webhook, `connection_id`, `continue_()` and `field_sources` need an API with those features too: they are on the API's feature branch, not yet on mesharc.dev.
+**The agent does not run on mesharc.dev yet**; web search does. The API has the agent, but a deployment runs agents only once it is set up for them, and until then a run is refused with 501 `agents_unavailable` -- as are follow-ups, agent tables and agent monitors. The client and the MCP tools are ready for it.
 
 The agent takes a question, searches the web, maps sites and reads pages on its own, and answers with the pages it used. Give it a schema and the answer comes back in that shape:
 
@@ -260,7 +260,7 @@ A run needs a key that can write, and it spends credits: each page it reads is c
 
 ### Follow-ups and conversations
 
-**Not live on mesharc.dev yet:** everything in this section needs an API with these features, which are on the API's feature branch.
+**Needs agents running:** mesharc.dev does not run agents yet, so everything in this section is refused there with 501 `agents_unavailable`.
 
 ```python
 first = arc.agent("Which plans does example.com sell?", urls=["https://example.com/pricing"])
@@ -277,7 +277,7 @@ A follow-up answers after everything asked and found in the conversation before 
 
 ### Saved logins, data providers and proposals
 
-**Not live on mesharc.dev yet:** everything in this section needs an API with these features, which are on the API's feature branch.
+**Needs agents running:** mesharc.dev does not run agents yet, so everything in this section is refused there with 501 `agents_unavailable`.
 
 ```python
 run = arc.agent(
@@ -292,7 +292,7 @@ run = arc.agent(
 
 ## Monitors: a search or a question, asked again on a schedule
 
-**Monitors (`arc.monitors`, the `/monitors` route) need an API with that feature**: it is on the API's feature branch, not yet on mesharc.dev. So do their caps, alerts, records and tone, below.
+Monitors are live on mesharc.dev. A monitor of an agent question, like every agent run, is refused there with 501 `agents_unavailable` until mesharc.dev runs agents; a search monitor is not.
 
 ```python
 monitor = arc.monitors.create(
@@ -348,7 +348,7 @@ Creating and running a monitor spend credits. Every call but `monitors.list`, `m
 
 ## The agent over a table
 
-**Not live on mesharc.dev yet:** everything in this section needs an API with these features, which are on the API's feature branch.
+**Needs agents running:** mesharc.dev does not run agents yet, so everything in this section is refused there with 501 `agents_unavailable`.
 
 ```python
 table = "Company,Website\nAcme,acme.com\nGlobex,globex.com\n"
@@ -375,7 +375,7 @@ A batch is kept 7 days, then `get` raises `MeshArcError` 410 `expired`.
 
 ## Triggers, proposals and what a month costs
 
-**Not live on mesharc.dev yet:** everything in this section needs an API with these features, which are on the API's feature branch.
+A trigger whose action is an agent run, and proposals (which agent runs make), need agents running, which mesharc.dev does not do yet; the rest of this section is live.
 
 ```python
 arc.triggers.create(
@@ -400,8 +400,6 @@ print(arc.estimate("agent", "weekly", max_credits=300))   # about what a month c
 
 ## Sub-accounts
 
-**Not live on mesharc.dev yet:** everything in this section needs an API with these features, which are on the API's feature branch.
-
 A workspace on Scale or Enterprise can make workspaces of its own for its customers: each with its own keys, projects and data, spending this workspace's credits under a cap of its own. Every call needs an admin key.
 
 ```python
@@ -421,8 +419,6 @@ arc.sub_accounts.update(acme["id"], suspended=True, reason="unpaid")   # refuses
 | `as_sub_account(id)` · `MeshArc(key, tenant=id)` | A client whose every request acts on that sub-account |
 
 ## Connections and saved logins
-
-**Not live on mesharc.dev yet:** everything in this section needs an API with these features, which are on the API's feature branch.
 
 ```python
 pdl = arc.connections.create("pdl", name="Company data", secrets={"api_key": "..."})
@@ -541,7 +537,7 @@ MESHARC_API_KEY=mesharc_... mesharc-mcp          # serves over stdio
 claude mcp add mesharc -e MESHARC_API_KEY=mesharc_... -- mesharc-mcp
 ```
 
-Tools: `scrape_urls`, `map_site`, `crawl_site`, `search_web`, `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `start_run`, `list_runs`, `list_pages`, `get_changes`, `get_job`, `cancel_job`, `run_agent`, `continue_agent`, `create_monitor`, `list_monitors`, `pause_monitor` and `get_monitor_rows` (the last six not live on mesharc.dev yet: they need the API's agent and monitor features, on its feature branch). `create_monitor` keeps a web search or an agent question on a schedule, each run compared with the last; `list_monitors` shows them and their runs, `pause_monitor` pauses and resumes one, and `get_monitor_rows` reads the records an agent monitor follows. `create_project` takes `max_credits_per_run` and `max_credits_per_month`. `get_project` shows a project's webhook and its recent deliveries, and `update_project` sets it and sends it a test (`test_webhook=true`). Every tool is a call through this client, and each one's answer is described by an output schema. A tool that fails answers `{error, status}`, with the API's `code` and `request_id` as well when it gave them.
+Tools: `scrape_urls`, `map_site`, `crawl_site`, `search_web`, `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `start_run`, `list_runs`, `list_pages`, `get_changes`, `get_job`, `cancel_job`, `run_agent`, `continue_agent`, `create_monitor`, `list_monitors`, `pause_monitor` and `get_monitor_rows` (`run_agent`, `continue_agent`, and `create_monitor` for an agent question, need agents running, which mesharc.dev does not do yet: they answer `{"code": "agents_unavailable"}`). `create_monitor` keeps a web search or an agent question on a schedule, each run compared with the last; `list_monitors` shows them and their runs, `pause_monitor` pauses and resumes one, and `get_monitor_rows` reads the records an agent monitor follows. `create_project` takes `max_credits_per_run` and `max_credits_per_month`. `get_project` shows a project's webhook and its recent deliveries, and `update_project` sets it and sends it a test (`test_webhook=true`). Every tool is a call through this client, and each one's answer is described by an output schema. A tool that fails answers `{error, status}`, with the API's `code` and `request_id` as well when it gave them.
 
 A result with many pages in it is a map, not the territory: a crawl answers with an index of the pages read (up to 500, fewer if the budget needs the room), an excerpt of as many as a 60,000-character budget pays for (fifty at most), and a count of each page's links rather than the links. Ask for the one page you want on its own with `get_job(kind="crawl", id=…, url=…)`, or carry on through the crawl with `cursor=`. A multi-URL scrape past its budget counts the rest by status and names any that did not come back ok. One page asked for on its own -- `list_pages` with `url`, or `scrape_urls` with a single url (with `full=true` for every format) -- comes back whole, capped at 12,000 characters. A `search_web` answer keeps within the same 60,000 characters, a scraped result's page as an excerpt; `scrape_urls` with `full=true` reads one in full. So does an agent's answer: past the budget its `fieldSources` (where each value of the answer came from) are left out first, then its sources are cut, to the first 50 (fewer if they would take more than half the room), and only then is `data` replaced by its JSON text, cut, with a note saying where the full answer is -- `GET /api/v1/agent/{id}`, or `get_agent(id)` in this client.
 

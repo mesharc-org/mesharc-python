@@ -145,6 +145,9 @@ class ScrapeOut(TypedDict, total=False):
     """A scrape. A list: status, the pages with excerpts and an index of every url. One URL: that page in
     full. full=true: the extraction, with the page under `page`. A batch still going: status 'running' and
     a job."""
+    notice: Annotated[Any, Field(description=(
+        "Only when a limit, not the site, held pages back: one line saying what they needed and why (the plan, "
+        "the stealth trial or the credits left). Tell the person; it comes first in the answer."))]
     status: Annotated[Any, Field(description=(
         "'done' once read; 'running' with a `job` while a batch goes on; with full=true, 'blocked' when the site "
         "refused and 'error' when the read failed. On an error, the HTTP status code."))]
@@ -170,6 +173,9 @@ class ScrapeOut(TypedDict, total=False):
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
+    notices: Annotated[Any, Field(description=(
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
+        "the plan that reads them, null for credits or a cap the workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -195,6 +201,9 @@ class MapOut(TypedDict, total=False):
 @with_config(ConfigDict(extra="allow"))
 class CrawlOut(TypedDict, total=False):
     """A crawl: the pages read, as an index plus excerpts, or a job when it is still going."""
+    notice: Annotated[Any, Field(description=(
+        "Only when a limit, not the site, held pages back: one line saying what they needed and why (the plan, "
+        "the stealth trial or the credits left). Tell the person; it comes first in the answer."))]
     crawl_id: Annotated[Any, Field(description=(
         "This crawl's id: for get_job, cancel_job, and create_project(crawl_id=...) to keep it."))]
     status: Annotated[Any, Field(description=(
@@ -213,6 +222,9 @@ class CrawlOut(TypedDict, total=False):
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
+    notices: Annotated[Any, Field(description=(
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
+        "the plan that reads them, null for credits or a cap the workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -383,6 +395,9 @@ class ChangesOut(TypedDict, total=False):
 class JobOut(TypedDict, total=False):
     """A job's state, or its result once finished: a crawl gives crawl_site's answer, a batch scrape_urls',
     a search search_web's, an agent run run_agent's, a run the run record, and `url` one page in full."""
+    notice: Annotated[Any, Field(description=(
+        "Only when a limit, not the site, held pages back: one line saying what they needed and why (the plan, "
+        "the stealth trial or the credits left). Tell the person; it comes first in the answer."))]
     status: Annotated[Any, Field(description=(
         "'running' while it goes on; otherwise the finished job's status; 'expired' for an agent run past its "
         "keep date. On an error, the HTTP status code."))]
@@ -413,6 +428,9 @@ class JobOut(TypedDict, total=False):
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
+    notices: Annotated[Any, Field(description=(
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
+        "the plan that reads them, null for credits or a cap the workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -435,6 +453,9 @@ class CancelOut(TypedDict, total=False):
 class SearchWebOut(TypedDict, total=False):
     """A web search: the ranked results, with an excerpt of each page when scraped, or a job when it is still
     going."""
+    notice: Annotated[Any, Field(description=(
+        "Only when a limit, not the site, held pages back: one line saying what they needed and why (the plan, "
+        "the stealth trial or the credits left). Tell the person; it comes first in the answer."))]
     id: Annotated[Any, Field(description="The search's id: for get_job with kind 'search'.")]
     status: Annotated[Any, Field(description=(
         "'done'; 'blocked' when every engine refused the results page (nothing charged); 'running' with a `job` "
@@ -455,6 +476,9 @@ class SearchWebOut(TypedDict, total=False):
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
+    notices: Annotated[Any, Field(description=(
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
+        "the plan that reads them, null for credits or a cap the workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -722,6 +746,36 @@ def _counts(row):
     return out
 
 
+def _limit_notice(notices=None, page=None):
+    """What a limit kept from an answer, said first: ``{notice, notices}``,
+    or ``{}`` when nothing was held back.
+
+    `notices` is the answer's own list (a crawl, a batch, a search), one per
+    reason; failing that, `page` is a single page and its own `limit`. The
+    `notice` line is their messages together, so an assistant tells the
+    person what was held back -- the page needed a plan, the trial ran out,
+    the credits ran short -- instead of quietly returning less. `notices`
+    keeps what a script would act on, the upgrade link among it.
+    """
+    rows = [n for n in (notices or []) if isinstance(n, dict) and n.get("message")]
+    if not rows and isinstance(page, dict) and isinstance(page.get("limit"), dict) and page["limit"].get("message"):
+        rows = [{**page["limit"], "pages": 1, "examples": [page.get("url", "")]}]
+    if not rows:
+        return {}
+    return {"notice": " ".join(str(n["message"]) for n in rows),
+            "notices": [{k: n.get(k) for k in ("reason", "pages", "needs", "examples", "unlockedBy", "upgradeUrl", "engine")
+                         if k != "engine" or n.get("engine")}
+                        for n in rows]}
+
+
+def _with_notice(out, notice):
+    """`out` with the notice line first and the list last, when there is one."""
+    if not notice:
+        return out
+    rest = {k: v for k, v in out.items() if k not in ("notice", "notices")}
+    return {"notice": notice["notice"], **rest, "notices": notice["notices"]}
+
+
 def _index_row(p):
     """What a page is, in four fields: enough to choose it by."""
     head = p.get("head")
@@ -925,7 +979,7 @@ def _shape_crawl(job, e, rows, window, reserve):
            "stop": e.get("stop", ""), "note": ". ".join(notes)}
     if window:
         out["cursor"] = window
-    return out
+    return _with_notice(out, _limit_notice(e.get("notices")))
 
 
 def _batch_result(b):
@@ -982,7 +1036,7 @@ def _shape_batch(base, rows, reserve):
             f"the index lists the first {kept} of {len(rows)} urls; `rest` counts the others by "
             "status and names those that did not come back ok. scrape_urls reads one again, "
             "and spends credits doing it")) if n)
-    return out
+    return _with_notice(out, _limit_notice(base.get("notices")))
 
 
 def _with_documents(config, parse_documents):
@@ -1183,7 +1237,7 @@ def scrape_urls(urls: Annotated[list[str], Field(
                 # get_project with no project_id lists them all.
                 if isinstance(r.get("config"), dict):
                     r["config"] = {k: v for k, v in r["config"].items() if k in (cfg or {})}
-                return r
+                return _with_notice(r, _limit_notice(page=r.get("page")))
         # A key of our own, so a retry -- the client's on a dropped
         # connection, the assistant's on a 429 -- lands on the same job, for
         # REUSE_WINDOW_S. force_refresh is a key nothing else has: read now.
@@ -1194,8 +1248,9 @@ def scrape_urls(urls: Annotated[list[str], Field(
                 # One URL takes the synchronous path: the API holds the
                 # request open for the page rather than making us poll.
                 page = _trim_page(s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key))
-                return _mark_reused({"status": "done", "urls": 1, "pages": [page]},
-                                    page.get("crawledAt") if isinstance(page, dict) else None, started)
+                return _with_notice(_mark_reused({"status": "done", "urls": 1, "pages": [page]},
+                                                 page.get("crawledAt") if isinstance(page, dict) else None,
+                                                 started), _limit_notice(page=page))
             # A list is a batch, and `scrape` waits for every row -- for up to
             # an hour by default. Hosted, that wait is bounded and the batch id
             # comes back instead, for get_job to pick up.
@@ -1382,7 +1437,7 @@ def _shape_search(out, hits, running, reserve):
         cap = max(EXCERPT_FLOOR, min(MARKDOWN_CAP, left // len(paged)))
         for i in paged:
             results[i]["page"] = _summary_page(hits[i]["page"], cap, how)
-    return shaped
+    return _with_notice(shaped, _limit_notice(out.get("notices")))
 
 
 @tool(title="Search the web",
