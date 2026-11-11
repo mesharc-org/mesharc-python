@@ -584,6 +584,20 @@ def test_hosted_web_search_asks_once_inside_its_budget(monkeypatch):
     assert out == {"error": "every engine failed", "status": 502, "code": "job_failed"}
 
 
+def test_a_hosted_search_handed_back_as_a_job_says_how_long_it_waited(monkeypatch):
+    """waitedMs: how long this call waited before handing the job back, so a
+    search that outlasts the wait can be traced (MCP re-test 6)."""
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: 25.0)
+    monkeypatch.setattr(mcp_mod, "_scopes", lambda: ["read", "write"])
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(_search(status="queued")))
+    out = mcp_mod.search_web("q")
+    assert out["status"] == "running" and isinstance(out["waitedMs"], int) and out["waitedMs"] >= 0
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(_search(status="running", hits=[_hit(0)])))
+    assert isinstance(mcp_mod.search_web("q", scrape=True)["waitedMs"], int), "a search still scraping says so too"
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(_search(hits=[_hit(0)])))
+    assert "waitedMs" not in mcp_mod.search_web("q"), "a finished search does not"
+
+
 def test_get_job_follows_a_search(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(_search(status="queued")))

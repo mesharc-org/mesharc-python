@@ -465,6 +465,9 @@ class SearchWebOut(TypedDict, total=False):
     cached: Annotated[Any, Field(description=(
         "true when an equal search within the hour answered it, with no charge for the results page."))]
     creditsUsed: Annotated[Any, Field(description="Credits this search spent, scraped pages included.")]
+    waitedMs: Annotated[Any, Field(description=(
+        "With status 'running': how long, in milliseconds, this call waited for the search before handing "
+        "back its job."))]
     results: Annotated[Any, Field(description=(
         "Up to 10, as ranked, each {position, title, url, snippet, source, engine}; when scraped also `page`, "
         "{url, title, words, status, links (a count), markdown excerpt}, the excerpts sharing 60,000 characters."))]
@@ -1499,13 +1502,17 @@ def search_web(query: Annotated[str, Field(
                     return _still_running("search", getattr(exc, "job_id", "") or "")
             # Hosted: the API holds the request for most of the budget and
             # answers with whatever it has, never a poll loop down this socket.
+            started = time.monotonic()
             out = s.web_search(query, wait=False, timeout_s=max(1.0, min(120.0, budget - 5)), **opts)
             if out.get("status") == "error":
                 raise MeshArcError(502, out.get("error") or "the search failed", "job_failed")
             if _running(out.get("status")):
+                # How long this call waited before handing the job back, so a
+                # search that outlasts the wait can be traced (MCP re-test 6).
+                waited = {"waitedMs": int((time.monotonic() - started) * 1000)}
                 if not out.get("data"):
-                    return _still_running("search", out.get("id", ""))
-                return _search_result(out, running=True)
+                    return _still_running("search", out.get("id", ""), extra=waited)
+                return {**_search_result(out, running=True), **waited}
             return _search_result(out)
     return _safe(go)
 
@@ -2399,6 +2406,11 @@ def get_changes(project_id: ProjectId, run_id: RunId = None,
         for k in ("feed", "fields", "withheld"):
             if isinstance(ch.get(k), list):
                 ch[k] = ch[k][:200]
+        # Its runs as start_run, list_runs and get_project give them: counts as
+        # numbers under one name each, not the screen's text beside them (MCP
+        # re-test 6, 11 Nov 2026).
+        if isinstance(r.get("runs"), list):
+            r["runs"] = [_counts(run) for run in r["runs"]]
         return r
     return _safe(go)
 
