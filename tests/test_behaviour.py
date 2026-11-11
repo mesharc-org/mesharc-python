@@ -112,6 +112,14 @@ def test_a_queued_search_is_polled_until_done():
     assert [c[:3] for c in http.calls[1:]] == [("GET", "/search/s2", {}), ("GET", "/search/s2", {})]
 
 
+def test_a_search_with_no_results_is_returned_not_raised():
+    """`no_results` (every engine refused or had nothing, since 11 Nov 2026) is an
+    answer, as `blocked` was: returned, never raised as a failed job."""
+    arc, http = client([{"id": "s5", "status": "running"}, {"id": "s5", "status": "no_results", "data": []}])
+    assert arc.web_search("q", poll=0)["status"] == "no_results"
+    assert len(http.calls) == 2
+
+
 def test_a_blocked_search_is_returned_not_raised():
     arc, http = client([{"id": "s3", "status": "running"}, {"id": "s3", "status": "blocked", "data": []}])
     assert arc.web_search("q", poll=0)["status"] == "blocked"

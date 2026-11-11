@@ -157,8 +157,8 @@ class ScrapeOut(TypedDict, total=False):
         "characters."))]
     index: Annotated[Any, Field(description=(
         "A list only: every url as {url, title, words, status}, so none is lost when excerpts are cut. A url "
-        "that did not come back ok also has reason and errorCode, e.g. status 'missing' with errorCode "
-        "DNS_FAILED is a name that does not resolve, not a 404."))]
+        "that did not come back ok also has reason and errorCode, e.g. status 'unreachable' with errorCode "
+        "DNS_FAILED is a name that does not resolve ('missing' is a 404)."))]
     rest: Annotated[Any, Field(description="A list past its index: {count, byStatus, notOk} for the urls not shown.")]
     reused: Annotated[Any, Field(description=(
         "true when this is the read an identical call made in the last ten minutes, not a new one; "
@@ -354,7 +354,7 @@ class PagesOut(TypedDict, total=False):
     truncated: Annotated[Any, Field(description="With q: true when more pages matched than are listed.")]
     url: Annotated[Any, Field(description="With url: the page's URL as stored.")]
     pageStatus: Annotated[Any, Field(description=(
-        "With url: ok, blocked, captcha, missing (404/410), timeout, redirect, robots or skipped."))]
+        "With url: ok, blocked, captcha, missing (404/410), unreachable (no such site), timeout, redirect, robots or skipped."))]
     words: Annotated[Any, Field(description="With url: words in its markdown.")]
     markdown: Annotated[Any, Field(description=(
         "With url: its main content as markdown, capped at 12,000 characters."))]
@@ -458,7 +458,7 @@ class SearchWebOut(TypedDict, total=False):
         "the stealth trial or the credits left). Tell the person; it comes first in the answer."))]
     id: Annotated[Any, Field(description="The search's id: for get_job with kind 'search'.")]
     status: Annotated[Any, Field(description=(
-        "'done'; 'blocked' when every engine refused the results page (nothing charged); 'running' with a `job` "
+        "'done'; 'no_results' when every engine refused the results page or had nothing about the query (nothing charged; an older API says 'blocked'); 'running' with a `job` "
         "while it goes on. On an error, the HTTP status code."))]
     query: Annotated[Any, Field(description="The query as searched.")]
     engine: Annotated[Any, Field(description="The engine whose results page answered, e.g. 'google' or 'bing'.")]
@@ -787,9 +787,10 @@ def _index_row(p):
 def _why(p):
     """Why a page did not come back ok, when the API said: {reason, errorCode}.
 
-    A name that does not resolve reads `missing`, as a 404 does; the reason
-    and the code (DNS_FAILED) are what tell the two apart, and an index row
-    used to drop both (MCP re-test, 11 Nov 2026). Nothing for a page that is ok.
+    A name that does not resolve reads `unreachable` (`missing` from an API
+    before 11 Nov 2026, as a 404 does); the reason and the code (DNS_FAILED)
+    tell them apart, and an index row used to drop both (MCP re-test, 11 Nov
+    2026). Nothing for a page that is ok.
     """
     if p.get("status") in ("ok", 200, None):
         return {}
@@ -1420,7 +1421,7 @@ def _shape_search(out, hits, running, reserve):
               "creditsUsed": out.get("creditsUsed"), "results": results}
     if out.get("error"):
         shaped["error"] = out["error"]
-    if out.get("status") == "blocked":
+    if out.get("status") in ("no_results", "blocked"):       # "blocked": an API before 11 Nov 2026
         shaped["attempts"] = out.get("attempts") or []
     notes = []
     if running:

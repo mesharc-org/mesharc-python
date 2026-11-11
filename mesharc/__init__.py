@@ -1355,7 +1355,8 @@ class MeshArc:
         ``screenshot`` and ``json``. A search that scrapes stays ``running``
         until its pages land, with the hits already in ``data``.
 
-        A ``blocked`` search (every engine refused) is returned, not
+        A ``no_results`` search (every engine refused or had nothing;
+        ``blocked`` from an API before 11 Nov 2026) is returned, not
         raised; ``error`` raises ``MeshArcError``. ``timeout_s`` is how
         long the API holds the request open (60 by default when waiting,
         120 at most); a slower search is then polled every ``poll`` seconds
@@ -1383,7 +1384,9 @@ class MeshArc:
             return out
         deadline = time.time() + timeout
         while True:
-            if out.get("status") in ("done", "blocked"):
+            # "no_results": every engine refused or had nothing; "blocked" is
+            # what an API before 11 Nov 2026 said for the same.
+            if out.get("status") in ("done", "no_results", "blocked"):
                 return _tell(out)
             if not _running(out.get("status")):
                 raise MeshArcError(502, out.get("error") or f"search {out.get('status')}", "job_failed")
