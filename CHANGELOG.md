@@ -6,6 +6,12 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.3 - 2026-11-12
+
+### Fixed
+
+- **A search no engine answered is `blocked`, with `outcome` saying why**, as the API released on 12 Nov 2026 sends it -- not the `no_results` status 0.7.1 described. `outcome` is `"no_results"` (every engine refused or had nothing; nothing charged) or `null` (the search did not run: the credits left could not pay for a results page). `web_search()` returns it as before; the MCP `search_web` tool now hands `outcome` on with the `attempts`, so a search stopped for credits no longer reads as one that found nothing. A `no_results` status is still read.
+
 ## 0.7.2 - 2026-11-11
 
 ### Fixed

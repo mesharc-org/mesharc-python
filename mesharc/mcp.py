@@ -458,8 +458,12 @@ class SearchWebOut(TypedDict, total=False):
         "the stealth trial or the credits left). Tell the person; it comes first in the answer."))]
     id: Annotated[Any, Field(description="The search's id: for get_job with kind 'search'.")]
     status: Annotated[Any, Field(description=(
-        "'done'; 'no_results' when every engine refused the results page or had nothing about the query (nothing charged; an older API says 'blocked'); 'running' with a `job` "
+        "'done'; 'blocked' when no engine answered (see `outcome`); 'running' with a `job` "
         "while it goes on. On an error, the HTTP status code."))]
+    outcome: Annotated[Any, Field(description=(
+        "With status 'blocked': 'no_results' when every engine refused the results page or had nothing about "
+        "the query (nothing charged); null when the search did not run because the credits left could not pay "
+        "for a results page -- tell the person, as a top-up or a plan change fixes it."))]
     query: Annotated[Any, Field(description="The query as searched.")]
     engine: Annotated[Any, Field(description="The engine whose results page answered, e.g. 'google' or 'bing'.")]
     cached: Annotated[Any, Field(description=(
@@ -1424,8 +1428,10 @@ def _shape_search(out, hits, running, reserve):
               "creditsUsed": out.get("creditsUsed"), "results": results}
     if out.get("error"):
         shaped["error"] = out["error"]
-    if out.get("status") in ("no_results", "blocked"):       # "blocked": an API before 11 Nov 2026
+    if out.get("status") in ("no_results", "blocked"):       # the API says "blocked", with `outcome`
         shaped["attempts"] = out.get("attempts") or []
+        if "outcome" in out:
+            shaped["outcome"] = out["outcome"]
     notes = []
     if running:
         shaped["job"] = {"kind": "search", "id": out.get("id", "")}
