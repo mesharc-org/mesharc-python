@@ -55,7 +55,42 @@ def test_one_url_past_the_wait_is_a_job_and_the_wait_is_the_budget(monkeypatch, 
     monkeypatch.setattr(mcp_mod, "_client", lambda: slow)
     out = mcp_mod.scrape_urls(["https://walled.test/"])
     assert out["status"] == "running" and out["job"] == {"kind": "batch", "id": "j1"}
-    assert slow.asked == [("scrape_one", 7, 7.0)], "the API holds the request no longer than the wait, and so does the poll"
+    assert slow.asked == [("scrape_one", 7, 0)], "the API holds the request for the wait, and nothing polls after it"
+
+
+def test_one_url_comes_back_within_the_wait_against_an_api_that_holds_it(monkeypatch, hosted):
+    """Timed through the real client: the API holds the POST for the whole
+    wait and answers it unfinished. Before, the client then polled for the wait
+    again -- twice the wait, ~90 s hosted."""
+    import time
+
+    from mesharc import MeshArc
+
+    class _Holding:
+        def __call__(self, method, path, json=None, params=None, idempotency_key=None, **kw):
+            if method == "POST":
+                time.sleep(json.get("timeout", 0))
+            return {"id": "s1", "status": "running"}
+
+        def pace(self):
+            pass
+
+    class _Ctx:
+        def __enter__(self):
+            c = MeshArc.__new__(MeshArc)
+            c._h = _Holding()
+            return c
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: 1.0)
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Ctx())
+    t = time.time()
+    out = mcp_mod.scrape_urls(["https://walled.test/"])
+    took = time.time() - t
+    assert out["job"] == {"kind": "batch", "id": "s1"}
+    assert took < 1.6, f"{took:.1f}s for a 1 s wait"
 
 
 def test_one_url_in_stdio_waits_as_it_always_did(monkeypatch):

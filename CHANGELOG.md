@@ -6,6 +6,12 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.5 - 2026-11-12
+
+### Fixed
+
+- **A hosted one-URL `scrape_urls` comes back within the wait.** 0.7.4 let the API hold the request for the wait and then polled for the wait again, so a page still being read came back as a job after about twice the wait (~90 s hosted), past the minute many MCP clients allow. The API's hold is now the whole wait, as `search_web`'s is.
+
 ## 0.7.4 - 2026-11-12
 
 ### Changed

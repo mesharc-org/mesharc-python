@@ -1325,12 +1325,15 @@ def scrape_urls(urls: Annotated[list[str], Field(
                 # Hosted, for no longer than the wait: past it the page is a
                 # job for get_job, as a batch is. Unbounded, the client polled
                 # for an hour and the caller's own timeout ended the call with
-                # nothing to come back to (MCP re-test 7, 12 Nov 2026).
+                # nothing to come back to (MCP re-test 7, 12 Nov 2026). The
+                # API's hold is the whole wait: `timeout=0` hands the job back
+                # as soon as the request returns unfinished, where a poll of
+                # its own after the hold made it twice the wait (~90 s).
                 budget = _budget()
                 try:
                     page = (s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key) if budget is None
                             else s.scrape_one(urls[0], config=cfg, formats=formats, idempotency_key=key,
-                                              timeout_s=int(max(1, min(60, budget))), timeout=budget))
+                                              timeout_s=int(max(1, min(60, budget))), timeout=0))
                 except MeshArcTimeoutError as exc:
                     if budget is None:
                         raise
