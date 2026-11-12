@@ -78,6 +78,10 @@ INDEX_CAP = 500
 REST_BUDGET = 8_000
 
 NAME = "mesharc"
+# Said only by a server that offers the agent tools (_build).
+AGENT_LINE = (
+    "run_agent hands a research question to an agent that searches and reads pages on its own, "
+    "returning a job for get_job; continue_agent carries on a run that stopped at its credit limit. ")
 INSTRUCTIONS = (
     "MeshArc turns URLs into clean content and keeps a record of what changed. "
     "Use scrape_urls for pages whose URLs you have (full=true for one page with every format), "
@@ -87,8 +91,7 @@ INSTRUCTIONS = (
     "The project tools are for a site watched over time: its runs, its pages, search inside a run, "
     "and its change record. search_web searches the web for pages whose URLs you do not know; "
     "list_pages with q searches only inside a project's run. "
-    "run_agent hands a research question to an agent that searches and reads pages on its own, "
-    "returning a job for get_job; continue_agent carries on a run that stopped at its credit limit. "
+    + AGENT_LINE +
     "create_monitor keeps a web search or an agent question and runs it again on a schedule, reporting what "
     "changed; list_monitors, pause_monitor and get_monitor_rows follow and manage them. "
     "A long tool may hand back a job: get_job follows it and cancel_job stops it. "
@@ -586,8 +589,16 @@ def tool(**how):
     return register
 
 
-def _build(**kw):
-    """A server with this package's tools on it, and whatever `kw` says.
+# The tools that start agent work. An API that runs no agents answers them
+# 501 `agents_unavailable`; listed anyway, an assistant reads their
+# instructions, calls them and fails (MCP re-test 7, 12 Nov 2026).
+AGENT_TOOLS = ("run_agent", "continue_agent")
+
+
+def _build(agents=True, **kw):
+    """A server with this package's tools on it, and whatever `kw` says;
+    without the agent tools (and the line of the instructions naming them)
+    when `agents` is false.
 
     Auth belongs in `kw`: `token_verifier` and `auth` are constructor
     arguments, and passing them here is what keeps this file off the SDK's
@@ -595,10 +606,28 @@ def _build(**kw):
     """
     # The version is the package's: left out, the handshake said "" (MCP
     # testing, 10 Nov 2026), and a client cannot tell 0.6.0 from a dev build.
-    srv = MCPServer(NAME, instructions=INSTRUCTIONS, version=__version__, **kw)
+    said = INSTRUCTIONS if agents else INSTRUCTIONS.replace(AGENT_LINE, "")
+    srv = MCPServer(NAME, instructions=said, version=__version__, **kw)
     for fn, how in _TOOLS:
-        srv.add_tool(fn, **how)
+        if agents or fn.__name__ not in AGENT_TOOLS:
+            srv.add_tool(fn, **how)
     return srv
+
+
+def _agents_live():
+    """Whether the API this server talks to runs agents, as its /meta says.
+    An API that does not say (one older than the field) or cannot be reached
+    is taken to run them: the tools stay, as before, and a refusal still
+    explains itself."""
+    import httpx
+    from . import DEFAULT_BASE
+    base = (os.environ.get("MESHARC_API_URL") or DEFAULT_BASE).rstrip("/")
+    try:
+        r = httpx.get(base + "/api/v1/meta", timeout=5.0)
+        flag = r.json().get("agents") if r.status_code == 200 else None
+    except Exception:                                      # noqa: BLE001
+        return True
+    return flag is not False
 
 
 class _Shared(MeshArc):
@@ -838,6 +867,39 @@ def _cost(obj):
     return len(json.dumps(obj))
 
 
+def _one_page(page, started=None):
+    """A one-URL scrape's answer, whether it came back in the call or through
+    get_job: the page, trimmed, with its limit notice and whether it was a
+    read made earlier."""
+    page = _trim_page(page)
+    out = {"status": "done", "urls": 1, "pages": [page]}
+    if started is not None:
+        out = _mark_reused(out, page.get("crawledAt") if isinstance(page, dict) else None, started)
+    return _with_notice(out, _limit_notice(page=page))
+
+
+def _extract_result(r, cfg=None):
+    """A `full=true` read's answer, from the call or through get_job: the page
+    without its link list, and only the settings this call set (the run's
+    settings are about a hundred keys, most of them defaults; MCP testing,
+    10 Nov 2026). get_project with no project_id lists them all."""
+    if r.get("page"):
+        r["page"] = _trim_page(r["page"])
+        r["page"].pop("links", None)
+    if isinstance(r.get("config"), dict):
+        r["config"] = {k: v for k, v in r["config"].items() if k in (cfg or {})}
+    return _with_notice(r, _limit_notice(page=r.get("page")))
+
+
+def _whole(shown, rows, kept, cap):
+    """Whether the excerpts are every page read, none of them cut: then the
+    index is the same list again, and is left out (MCP re-test 7, 12 Nov
+    2026: a two-url scrape carried both `pages` and `index`). The index is
+    there for the pages not shown."""
+    return (len(shown) == len(rows) == kept
+            and not any(isinstance(p.get("markdown"), str) and len(p["markdown"]) > cap for p in rows))
+
+
 def _excerpts(rows, how, reserve=0):
     """How a multi-page answer spends its budget: (pages, index, cap, kept).
 
@@ -985,6 +1047,8 @@ def _shape_crawl(job, e, rows, window, reserve):
     out = {"crawl_id": job.id, "status": e.get("status"), "url": e.get("url", ""),
            "pages": shaped, "index": index, "counts": e.get("counts"),
            "stop": e.get("stop", ""), "note": ". ".join(notes)}
+    if not more and _whole(shaped, rows, kept, cap):
+        del out["index"]
     if window:
         out["cursor"] = window
     return _with_notice(out, _limit_notice(e.get("notices")))
@@ -1024,8 +1088,10 @@ def _shape_batch(base, rows, reserve):
     """One pass at a batch's answer, at the budget `reserve` leaves. The caller
     named every url and needs to know how each went: past the index, a count by
     status and the urls that did not come back ok."""
-    pages, index, _cap, kept = _excerpts(rows, "call scrape_urls with that url", reserve)
+    pages, index, cap, kept = _excerpts(rows, "call scrape_urls with that url", reserve)
     out = {**base, "pages": pages, "index": index}
+    if _whole(pages, rows, kept, cap):
+        del out["index"]
     rest = rows[kept:]
     if rest:
         by_status: dict = {}
@@ -1234,18 +1300,19 @@ def scrape_urls(urls: Annotated[list[str], Field(
         if full:
             if len(urls) != 1:
                 return {"error": "full reads one page: pass exactly one url", "code": "validation"}
+            budget = _budget()
             with _client() as s:
-                r = s.extract(urls[0], config=cfg)
-                if r.get("page"):
-                    r["page"] = _trim_page(r["page"])
-                    r["page"].pop("links", None)
-                # The run's settings are every key with its value, about a
-                # hundred, most of them defaults nobody asked about: only the
-                # ones this call set come back (MCP testing, 10 Nov 2026).
-                # get_project with no project_id lists them all.
-                if isinstance(r.get("config"), dict):
-                    r["config"] = {k: v for k, v in r["config"].items() if k in (cfg or {})}
-                return _with_notice(r, _limit_notice(page=r.get("page")))
+                try:
+                    r = s.extract(urls[0], config=cfg) if budget is None else \
+                        s.extract(urls[0], config=cfg, timeout=budget)
+                except MeshArcTimeoutError as exc:
+                    if budget is None:
+                        raise
+                    # Hosted, a page that outlasts the wait is a job, as a
+                    # batch is: the call never runs into the client's own
+                    # timeout (MCP re-test 7: 230 s and nothing back).
+                    return _still_running("extract", getattr(exc, "job_id", "") or "")
+                return _extract_result(r, cfg)
         # A key of our own, so a retry -- the client's on a dropped
         # connection, the assistant's on a 429 -- lands on the same job, for
         # REUSE_WINDOW_S. force_refresh is a key nothing else has: read now.
@@ -1255,10 +1322,20 @@ def scrape_urls(urls: Annotated[list[str], Field(
             if len(urls) == 1:
                 # One URL takes the synchronous path: the API holds the
                 # request open for the page rather than making us poll.
-                page = _trim_page(s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key))
-                return _with_notice(_mark_reused({"status": "done", "urls": 1, "pages": [page]},
-                                                 page.get("crawledAt") if isinstance(page, dict) else None,
-                                                 started), _limit_notice(page=page))
+                # Hosted, for no longer than the wait: past it the page is a
+                # job for get_job, as a batch is. Unbounded, the client polled
+                # for an hour and the caller's own timeout ended the call with
+                # nothing to come back to (MCP re-test 7, 12 Nov 2026).
+                budget = _budget()
+                try:
+                    page = (s.scrape(urls[0], config=cfg, formats=formats, idempotency_key=key) if budget is None
+                            else s.scrape_one(urls[0], config=cfg, formats=formats, idempotency_key=key,
+                                              timeout_s=int(max(1, min(60, budget))), timeout=budget))
+                except MeshArcTimeoutError as exc:
+                    if budget is None:
+                        raise
+                    return _still_running("batch", getattr(exc, "job_id", "") or "")
+                return _one_page(page, started)
             # A list is a batch, and `scrape` waits for every row -- for up to
             # an hour by default. Hosted, that wait is bounded and the batch id
             # comes back instead, for get_job to pick up.
@@ -2421,9 +2498,9 @@ def get_changes(project_id: ProjectId, run_id: RunId = None,
     return _safe(go)
 
 
-JobKind = Annotated[Literal["crawl", "run", "batch", "agent"], Field(
-    description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls with several URLs) or 'agent' "
-                "(run_agent or continue_agent).")]
+JobKind = Annotated[Literal["crawl", "run", "batch", "extract", "agent"], Field(
+    description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls), 'extract' (scrape_urls with "
+                "full=true) or 'agent' (run_agent or continue_agent).")]
 JobId = Annotated[str, Field(description="The job's id.")]
 JobProject = Annotated[str | None, Field(description="A run's project id; required for a run, ignored otherwise.")]
 
@@ -2445,9 +2522,10 @@ JobProject = Annotated[str | None, Field(description="A run's project id; requir
                   "answers with its results and the job. A crawl expires a day after it started unless kept, then "
                   "answers 404; an agent run is kept 7 days, then answers with status 'expired'.\n"
                   "Read-only and free: it reads stored data and never fetches.")
-def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search", "agent"], Field(
-                description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls with several URLs), "
-                            "'search' (search_web) or 'agent' (run_agent or continue_agent).")],
+def get_job(kind: Annotated[Literal["crawl", "run", "batch", "extract", "search", "agent"], Field(
+                description="'crawl' (crawl_site), 'run' (start_run), 'batch' (scrape_urls), 'extract' "
+                            "(scrape_urls with full=true), 'search' (search_web) or 'agent' (run_agent or "
+                            "continue_agent).")],
             id: JobId,
             project_id: JobProject = None,
             url: Annotated[str | None, Field(
@@ -2494,7 +2572,21 @@ def get_job(kind: Annotated[Literal["crawl", "run", "batch", "search", "agent"],
                 return _still_running("run", id, run.get("counts"), project_id=project_id)
             return _counts(run)
         if kind == "batch":
-            return _batch_result(s.batch(id))
+            b = s.batch(id)
+            if b.get("kind") == "scrape":
+                # A one-URL scrape that outlasted its wait: the API answers it
+                # as one page (in `data`), not as a batch of rows.
+                if _running(b.get("status")):
+                    return _still_running("batch", id)
+                if b.get("status") != "done" or not b.get("data"):
+                    raise MeshArcError(502, b.get("error") or f"the scrape {b.get('status')}", "job_failed")
+                return _one_page(b["data"][0])
+            return _batch_result(b)
+        if kind == "extract":
+            r = s.get_extract(id)
+            if _running(r.get("status")):
+                return _still_running("extract", id)
+            return _extract_result(r)
         if kind == "search":
             out = s.get_search(id)
             status = out.get("status")
@@ -2576,12 +2668,22 @@ def cancel_job(kind: JobKind, id: JobId, project_id: JobProject = None) -> Cance
             s.cancel_batch(id)
             return {"kind": "batch", "id": id,
                     "outcome": "cancelled" if status == "queued" else "cancelling", "note": CANCEL_NOTE}
+        if kind == "extract":
+            # One run, stopped through the scrape cancel, which takes any
+            # one-page run of this workspace.
+            status = s.get_extract(id).get("status")
+            if not _running(status):
+                return {"kind": "extract", "id": id, "outcome": status,
+                        "note": "already finished; nothing was stopped"}
+            s.cancel_batch(id)
+            return {"kind": "extract", "id": id, "outcome": "cancelling",
+                    "note": "the page being read finishes first"}
         if kind == "agent":
             # The API says what it did: cancelled (queued), cancelling (the
             # step under way finishes first), or a finished run's status.
             answer = s.cancel_agent(id) or {}
             return {"kind": "agent", "id": id, "outcome": answer.get("status"), "note": AGENT_CANCEL_NOTE}
-        return {"error": f"kind must be crawl, run, batch or agent, not {kind!r}", "code": "validation"}
+        return {"error": f"kind must be crawl, run, batch, extract or agent, not {kind!r}", "code": "validation"}
     return _safe(go)
 
 
@@ -2711,7 +2813,7 @@ def _transport_security(public_url):
     )
 
 
-def authorize(issuer, public, secret):
+def authorize(issuer, public, secret, agents=True):
     """The hosted server: the same seventeen tools, with OAuth attached.
 
     A server of its own rather than the stdio one with auth bolted on after
@@ -2734,6 +2836,7 @@ def authorize(issuer, public, secret):
     from pydantic import AnyHttpUrl
     verifier = _IntrospectionVerifier(issuer, public, secret)
     server = _build(
+        agents=agents,
         token_verifier=verifier,
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(issuer),
@@ -2755,7 +2858,7 @@ def main() -> None:
 
     Stdio stays the default, so an existing install is untouched by this.
     """
-    global _HTTP
+    global _HTTP, server
     ap = argparse.ArgumentParser(prog="mesharc-mcp", description="MeshArc as an MCP server.")
     ap.add_argument("--http", action="store_true",
                     help="serve streamable HTTP with OAuth instead of stdio")
@@ -2763,7 +2866,10 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8040)
     args = ap.parse_args()
 
+    agents = _agents_live()
     if not args.http:
+        if not agents:
+            server = _build(agents=False)
         server.run("stdio")
         return
 
@@ -2782,7 +2888,9 @@ def main() -> None:
         print("  ! MESHARC_API_KEY is set and will be ignored: in http mode every "
               "request acts as the caller who sent it.", flush=True)
 
-    verifier = authorize(issuer, public, secret)
+    verifier = authorize(issuer, public, secret, agents=agents)
+    if not agents:
+        print("  the API runs no agents: run_agent and continue_agent are not offered", flush=True)
     _check_secret(verifier)
     _HTTP = True
 
