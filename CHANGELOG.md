@@ -6,6 +6,12 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.4 - 2026-11-12
+
+### Changed
+
+- **mesharc.dev runs the agent** since 12 Nov 2026: the README no longer says it refuses agent runs, follow-ups, agent tables, agent monitors and triggers that start an agent run, nor that the MCP `run_agent`, `continue_agent` and agent `create_monitor` answer `agents_unavailable` there. No code changes; a deployment not set up for agents still refuses them with 501 `agents_unavailable`.
+
 ## 0.7.3 - 2026-11-12
 
 ### Fixed
