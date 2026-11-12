@@ -6,8 +6,8 @@ The Python client for the [MeshArc](https://mesharc.dev) API: a URL in, clean co
 - **Crawl** a whole site with no project to set up first, and keep it as one if it turns out to be worth watching.
 - **Map** what a site declares in its sitemaps before fetching any of it.
 - **Search** the web for pages whose URLs you do not know, and read each result's page in the same call.
-- **Ask** the agent a question: it searches, reads pages and answers, in the shape of a schema if you give one, with the pages its answer rests on. (Not live on mesharc.dev yet.)
-- **Monitor** a search or a question: asked again hourly, daily or weekly, each answer compared with the last, a webhook told when it changed. (A question needs the agent, which mesharc.dev does not run yet.)
+- **Ask** the agent a question: it searches, reads pages and answers, in the shape of a schema if you give one, with the pages its answer rests on.
+- **Monitor** a search or a question: asked again hourly, daily or weekly, each answer compared with the last, a webhook told when it changed.
 - **Watch** a site over time: projects, scheduled runs, and a change record — pages added, removed, modified, field by field.
 
 Python 3.10 or newer. One dependency (`httpx`). Fully typed.
@@ -178,7 +178,7 @@ A search needs a key that can write, and it spends credits. The results page cos
 
 ## Asking the agent
 
-**The agent does not run on mesharc.dev yet**; web search does. The API has the agent, but a deployment runs agents only once it is set up for them, and until then a run is refused with 501 `agents_unavailable` -- as are follow-ups, agent tables and agent monitors. The client and the MCP tools are ready for it.
+**The agent runs on mesharc.dev** (since 12 Nov 2026), as web search does. A deployment that is not set up for agents refuses a run with 501 `agents_unavailable`, as it does follow-ups, agent tables and agent monitors.
 
 The agent takes a question, searches the web, maps sites and reads pages on its own, and answers with the pages it used. Give it a schema and the answer comes back in that shape:
 
@@ -260,8 +260,6 @@ A run needs a key that can write, and it spends credits: each page it reads is c
 
 ### Follow-ups and conversations
 
-**Needs agents running:** mesharc.dev does not run agents yet, so everything in this section is refused there with 501 `agents_unavailable`.
-
 ```python
 first = arc.agent("Which plans does example.com sell?", urls=["https://example.com/pricing"])
 first.wait()
@@ -277,8 +275,6 @@ A follow-up answers after everything asked and found in the conversation before 
 
 ### Saved logins, data providers and proposals
 
-**Needs agents running:** mesharc.dev does not run agents yet, so everything in this section is refused there with 501 `agents_unavailable`.
-
 ```python
 run = arc.agent(
     "How many employees does Stripe have, and what was Apple's revenue last year?",
@@ -292,7 +288,7 @@ run = arc.agent(
 
 ## Monitors: a search or a question, asked again on a schedule
 
-Monitors are live on mesharc.dev. A monitor of an agent question, like every agent run, is refused there with 501 `agents_unavailable` until mesharc.dev runs agents; a search monitor is not.
+Monitors are live on mesharc.dev, of a web search and of an agent question.
 
 ```python
 monitor = arc.monitors.create(
@@ -348,8 +344,6 @@ Creating and running a monitor spend credits. Every call but `monitors.list`, `m
 
 ## The agent over a table
 
-**Needs agents running:** mesharc.dev does not run agents yet, so everything in this section is refused there with 501 `agents_unavailable`.
-
 ```python
 table = "Company,Website\nAcme,acme.com\nGlobex,globex.com\n"
 ask = dict(csv=table, max_credits_per_row=300, urls=["{{Website}}"],
@@ -374,8 +368,6 @@ One agent run a row: the prompt and starting URLs filled from the row's columns,
 A batch is kept 7 days, then `get` raises `MeshArcError` 410 `expired`.
 
 ## Triggers, proposals and what a month costs
-
-A trigger whose action is an agent run, and proposals (which agent runs make), need agents running, which mesharc.dev does not do yet; the rest of this section is live.
 
 ```python
 arc.triggers.create(
