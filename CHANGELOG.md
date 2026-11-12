@@ -6,6 +6,13 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **A hosted one-URL `scrape_urls`, and `full=true`, come back as a job when they outlast the wait**, as a batch does, instead of holding the call until the client gives up (a walled page ran 230 s with nothing back). `get_job(kind="batch")` reads a one-URL scrape as its page, `get_job(kind="extract")` reads a `full=true` one, and `cancel_job(kind="extract")` stops one. Run locally (stdio) they wait, as before.
+- **The client has `get_extract(id)`**, an `extract` started earlier as it stands.
+- **The MCP server leaves out `run_agent` and `continue_agent` when the API runs no agents.** At start it reads the API's `/meta`; with `agents: false` the two tools, and the line of the instructions naming them, are not offered, so an assistant is not handed a tool that only answers 501 `agents_unavailable`. An API that does not say (one older than the field), or cannot be reached, keeps them as before.
+- **A multi-page `scrape_urls` or crawl answer carries `index` only when it adds something.** With every page excerpted in full, the index was the same list as `pages` again; it is now left out. It stays when a page was cut, or when there are more pages than are shown.
+
 ## 0.7.3 - 2026-11-12
 
 ### Fixed

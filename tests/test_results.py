@@ -220,8 +220,8 @@ def test_the_cursor_returns_the_next_window(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Arc(job))
     out = mcp_mod.get_job("crawl", "c1", cursor="60")
     assert job.asked[-1]["cursor"] == "60", "the cursor has to reach the walk"
-    assert [r["url"] for r in out["index"]] == [f"https://x.test/{i}" for i in range(60, 80)]
-    assert out["pages"][0]["url"] == "https://x.test/60"
+    assert [r["url"] for r in out["pages"]] == [f"https://x.test/{i}" for i in range(60, 80)]
+    assert "index" not in out, "every page of the window is excerpted in full: the index would repeat them"
 
 
 def test_a_cursor_reads_a_running_crawl_rather_than_reporting_it(monkeypatch):
@@ -232,7 +232,7 @@ def test_a_cursor_reads_a_running_crawl_rather_than_reporting_it(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Arc(job))
     assert mcp_mod.get_job("crawl", "c1")["status"] == "running"
     out = mcp_mod.get_job("crawl", "c1", cursor="5")
-    assert len(out["index"]) == 5
+    assert len(out["pages"]) == 5 and "index" not in out
 
 
 def test_scraping_one_url_still_returns_the_whole_page(monkeypatch):

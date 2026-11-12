@@ -112,9 +112,28 @@ def test_a_name_that_does_not_resolve_is_told_apart_from_a_404_in_the_index(monk
             {"url": "https://x.test/gone", "status": "missing", "words": 0, "reason": "HTTP 404", "errorCode": "NOT_FOUND"},
             {"url": "https://x.test/robots", "status": "robots", "error": "robots.txt disallows this url"}]
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Arc(rows=rows))
-    index = {r["url"]: r for r in mcp_mod.scrape_urls([r["url"] for r in rows])["index"]}
+    out = mcp_mod.scrape_urls([r["url"] for r in rows])
+    # Every url excerpted in full: the pages carry what an index row would,
+    # and the index is left out rather than said twice (MCP re-test 7).
+    assert "index" not in out
+    index = {r["url"]: r for r in out["pages"]}
     assert "reason" not in index["https://x.test/a"] and "errorCode" not in index["https://x.test/a"]
     assert index["https://no-such-host.test/"]["errorCode"] == "DNS_FAILED"
     assert "does not resolve" in index["https://no-such-host.test/"]["reason"]
     assert index["https://x.test/gone"]["errorCode"] == "NOT_FOUND"
     assert index["https://x.test/robots"]["reason"] == "robots.txt disallows this url"
+
+
+def test_a_batch_shown_in_full_has_no_index_and_one_cut_short_keeps_it(monkeypatch):
+    """The index lists the pages read so an assistant can ask for those it was
+    not shown. With every page excerpted whole it is the same list twice (MCP
+    re-test 7, 12 Nov 2026: a two-url scrape carried both); with a page cut
+    short it stays, as the map of what was read."""
+    urls = ["https://x.test/a", "https://x.test/b"]
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Arc())
+    out = mcp_mod.scrape_urls(urls)
+    assert [p["url"] for p in out["pages"]] == urls and "index" not in out
+    long = [{"url": u, "status": "ok", "words": 5, "markdown": "m" * (mcp_mod.MARKDOWN_CAP + 500)} for u in urls]
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Arc(rows=long))
+    out = mcp_mod.scrape_urls(urls)
+    assert [r["url"] for r in out["index"]] == urls
