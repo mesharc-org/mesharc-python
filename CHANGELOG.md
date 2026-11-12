@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.4 - 2026-11-12
+
 ### Changed
 
 - **A hosted one-URL `scrape_urls`, and `full=true`, come back as a job when they outlast the wait**, as a batch does, instead of holding the call until the client gives up (a walled page ran 230 s with nothing back). `get_job(kind="batch")` reads a one-URL scrape as its page, `get_job(kind="extract")` reads a `full=true` one, and `cancel_job(kind="extract")` stops one. Run locally (stdio) they wait, as before.
