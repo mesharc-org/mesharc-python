@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl", "AgentRun"]
 TENANT_HEADER = "X-MeshArc-Tenant"
 
@@ -1355,9 +1355,11 @@ class MeshArc:
         ``screenshot`` and ``json``. A search that scrapes stays ``running``
         until its pages land, with the hits already in ``data``.
 
-        A ``no_results`` search (every engine refused or had nothing;
-        ``blocked`` from an API before 11 Nov 2026) is returned, not
-        raised; ``error`` raises ``MeshArcError``. ``timeout_s`` is how
+        A ``blocked`` search (no engine answered) is returned, not raised;
+        its ``outcome`` says why: ``"no_results"`` (every engine refused or
+        had nothing; nothing charged) or ``None`` (it did not run: the
+        credits left could not pay for a results page). ``error`` raises
+        ``MeshArcError``. ``timeout_s`` is how
         long the API holds the request open (60 by default when waiting,
         120 at most); a slower search is then polled every ``poll`` seconds
         for up to ``timeout`` seconds. ``wait=False`` returns at once,
@@ -1384,8 +1386,8 @@ class MeshArc:
             return out
         deadline = time.time() + timeout
         while True:
-            # "no_results": every engine refused or had nothing; "blocked" is
-            # what an API before 11 Nov 2026 said for the same.
+            # "blocked": no engine answered (`outcome` says why). "no_results"
+            # is read too, though the API keeps "blocked".
             if out.get("status") in ("done", "no_results", "blocked"):
                 return _tell(out)
             if not _running(out.get("status")):

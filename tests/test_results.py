@@ -547,6 +547,24 @@ def test_a_blocked_search_says_how_it_was_refused(monkeypatch):
     assert out["status"] == "blocked" and out["results"] == []
     assert out["error"] == "every engine refused the results page"
     assert out["attempts"] == blocked["attempts"]
+    assert "outcome" not in out, "an API without `outcome` hands none on"
+
+
+def test_a_blocked_search_hands_on_its_outcome(monkeypatch):
+    """The API keeps `blocked` and says why in `outcome`: nothing found, or
+    not run for want of credits (null) -- two different things to tell."""
+    for outcome in ("no_results", None):
+        blocked = _search(status="blocked", outcome=outcome, attempts=[{"engine": "google", "ok": False}])
+        monkeypatch.setattr(mcp_mod, "_client", lambda b=blocked: _Searches(b))
+        monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+        out = mcp_mod.search_web("q")
+        assert (out["status"], out["outcome"], out["attempts"]) == ("blocked", outcome, blocked["attempts"])
+
+
+def test_a_done_search_carries_no_outcome(monkeypatch):
+    monkeypatch.setattr(mcp_mod, "_client", lambda: _Searches(_search(outcome=None)))
+    monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
+    assert "outcome" not in mcp_mod.search_web("q")
 
 
 def test_a_local_search_that_outlasts_the_clients_wait_hands_back_its_job(monkeypatch):

@@ -120,6 +120,15 @@ def test_a_search_with_no_results_is_returned_not_raised():
     assert len(http.calls) == 2
 
 
+def test_a_blocked_search_is_returned_with_its_outcome():
+    """The API keeps `blocked` for a search no engine answered, and says why in
+    `outcome`; the client returns it as it came."""
+    arc, http = client([{"id": "s6", "status": "running"},
+                        {"id": "s6", "status": "blocked", "outcome": "no_results", "data": []}])
+    out = arc.web_search("q", poll=0)
+    assert (out["status"], out["outcome"]) == ("blocked", "no_results")
+
+
 def test_a_blocked_search_is_returned_not_raised():
     arc, http = client([{"id": "s3", "status": "running"}, {"id": "s3", "status": "blocked", "data": []}])
     assert arc.web_search("q", poll=0)["status"] == "blocked"
