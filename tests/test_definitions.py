@@ -77,9 +77,9 @@ def test_fixed_choices_are_listed():
         options = [schema] + list(schema.get("anyOf") or [])
         return next(o["enum"] for o in options if "enum" in o)
 
-    assert enum("get_job", "kind") == ["crawl", "run", "batch", "search", "agent"]
+    assert enum("get_job", "kind") == ["crawl", "run", "batch", "extract", "search", "agent"]
     # A web search cannot be stopped: the API has no cancel for one.
-    assert enum("cancel_job", "kind") == ["crawl", "run", "batch", "agent"]
+    assert enum("cancel_job", "kind") == ["crawl", "run", "batch", "extract", "agent"]
     assert enum("list_pages", "mode") == ["content", "selector"]
     for tool in ("create_project", "update_project"):
         assert enum(tool, "schedule") == ["manual", "hourly", "daily", "weekly"]

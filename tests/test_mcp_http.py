@@ -469,3 +469,47 @@ def test_auth_is_attached_through_the_constructor(served):
     assert names == EXPECTED
     assert "get_job" in names
     assert all(how.get("description") for _fn, how in mcp_mod._TOOLS),         "a tool with no description is a verb an assistant cannot choose"
+
+
+def test_a_server_whose_api_runs_no_agents_does_not_offer_the_agent_tools():
+    """An API that runs no agents answers run_agent 501; listed anyway, an
+    assistant reads the tool, calls it and fails (MCP re-test 7, 12 Nov
+    2026). Built without them, the rest are all there and the instructions
+    do not name them."""
+    import anyio
+
+    srv = mcp_mod._build(agents=False)
+    served = {t.name for t in anyio.run(srv.list_tools)}
+    assert served == EXPECTED - set(mcp_mod.AGENT_TOOLS)
+    assert "run_agent" not in (srv.instructions or "") and "search_web" in (srv.instructions or "")
+    assert "run_agent" in mcp_mod._build().instructions
+
+
+def test_the_agent_tools_follow_what_the_api_says(monkeypatch):
+    """/meta's `agents` decides. An API that does not say (one older than the
+    field), answers an error, or cannot be reached keeps the tools: off only
+    when the API says it is off."""
+    import httpx
+
+    class _R:
+        def __init__(self, status, body):
+            self.status_code, self._body = status, body
+
+        def json(self):
+            return self._body
+
+    answers = {"off": _R(200, {"agents": False}), "on": _R(200, {"agents": True}),
+               "older": _R(200, {"tiers": []}), "error": _R(503, {})}
+    asked = []
+    for name, answer in answers.items():
+        monkeypatch.setattr(httpx, "get", lambda url, timeout=None, a=answer: (asked.append(url), a)[1])
+        assert mcp_mod._agents_live() is (name != "off"), name
+
+    def _down(url, timeout=None):
+        raise httpx.ConnectError("no route")
+    monkeypatch.setattr(httpx, "get", _down)
+    assert mcp_mod._agents_live() is True
+    monkeypatch.setenv("MESHARC_API_URL", "https://api.example.test/")
+    monkeypatch.setattr(httpx, "get", lambda url, timeout=None: (asked.append(url), answers["on"])[1])
+    mcp_mod._agents_live()
+    assert asked[-1] == "https://api.example.test/api/v1/meta"

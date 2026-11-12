@@ -1189,7 +1189,7 @@ class MeshArc:
             return job
         deadline = time.time() + timeout
         while True:
-            r = self._h("GET", f"/playground/{job['id']}")
+            r = self.get_extract(job["id"])
             if not _running(r["status"]):
                 return r
             if time.time() >= deadline:
@@ -1267,6 +1267,11 @@ class MeshArc:
                 raise MeshArcTimeoutError(f"batch {batch_id} is still {r['status']} after {timeout}s", batch_id)
             time.sleep(poll)
             self._h.pace()
+
+    def get_extract(self, extract_id: str) -> Json:
+        """An `extract` started earlier, as it stands: its status, and the
+        page once read."""
+        return self._h("GET", f"/playground/{extract_id}")
 
     def cancel_batch(self, batch_id: str) -> None:
         """Stop a scrape: every run of a batch, or a one-URL scrape still going.
