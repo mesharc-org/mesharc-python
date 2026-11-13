@@ -140,3 +140,32 @@ def test_a_search_notice_keeps_the_engine_it_names():
     search = {**NOTICE, "pages": 1, "examples": [], "engine": "google"}
     assert mcp_mod._limit_notice([search])["notices"][0]["engine"] == "google"
     assert "engine" not in mcp_mod._limit_notice([NOTICE])["notices"][0], "absent where the API sends none"
+
+
+@pytest.mark.parametrize("likely, said", [
+    ("yes", "The stealth tier is likely to read it: a captcha widget, which the stealth tier's solver answers."),
+    ("no", "The stealth tier is not likely to read it either: a captcha widget, which the stealth tier's solver "
+           "answers."),
+    ("unknown", "Whether the stealth tier reads it is not known: a captcha widget, which the stealth tier's solver "
+                "answers."),
+])
+def test_a_page_limit_says_whether_the_tier_it_needs_is_likely_to_read_it(likely, said):
+    """The API's `outlook` on a page's limit (13 Nov 2026) is said on the
+    notice line and kept in the list, so an upgrade is not offered with no
+    word of whether it would help."""
+    outlook = {"tier": "stealth", "likely": likely, "why": "a captcha widget, which the stealth tier's solver answers"}
+    page = {"url": "https://a.test/", "limit": {**LIMIT, "needs": "stealth", "outlook": outlook}}
+    out = mcp_mod._limit_notice(page=page)
+    assert out["notice"] == LIMIT["message"] + " " + said
+    assert out["notices"][0]["outlook"] == outlook
+    assert "outlook" not in mcp_mod._limit_notice(page={"url": "u", "limit": LIMIT})["notices"][0], \
+        "absent where the API sends none"
+    assert mcp_mod._limit_notice(page={"url": "u", "limit": LIMIT})["notice"] == LIMIT["message"]
+
+
+def test_search_web_says_how_a_search_is_read_and_charged_today():
+    """DuckDuckGo between Google and Bing, and one price for a search
+    (Seam-be #97, live 13 Nov 2026): no "4 credits or more"."""
+    text = mcp_mod._build()._tool_manager.get_tool("search_web").description
+    assert "DuckDuckGo" in text and "at most 4 credits a search" in text
+    assert "or more" not in text and "Bing's when Google refuses" not in text

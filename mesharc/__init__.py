@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl", "AgentRun"]
 TENANT_HEADER = "X-MeshArc-Tenant"
 
@@ -1210,8 +1210,10 @@ class MeshArc:
 
         ``destination`` is the id of one of the workspace's destinations --
         a database, a warehouse, a bucket. When the job is done its pages are
-        written there as well as returned; the job says how the write went
-        under ``destinationSync``.
+        written there as well as returned; the finished batch says how the
+        write went under ``destinationSync``. One URL returns only the page,
+        which does not carry it: pass ``wait=False`` for the job envelope, and
+        ``batch(id, wait=True)`` reads that envelope once the job is done.
         """
         if isinstance(urls, str):
             return self.scrape_one(urls, config=config, formats=formats, wait=wait, poll=poll,
@@ -1237,7 +1239,8 @@ class MeshArc:
         page (60 by default, 120 at most); a slower page comes back as a
         job, which is then polled every ``poll`` seconds for up to
         ``timeout`` seconds. ``destination`` writes the page to one of the
-        workspace's destinations as well, as for ``scrape``.
+        workspace's destinations as well, as for ``scrape``; how the write
+        went (``destinationSync``) is on the job envelope, not the page.
         """
         body: Json = {"url": url, "formats": formats, "timeout": timeout_s}
         if config:
