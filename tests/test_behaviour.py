@@ -43,6 +43,26 @@ def test_a_list_of_urls_is_a_batch():
     assert http.calls[0][3].get("urls") == ["https://x.test/a"]
 
 
+def test_a_scrape_names_its_destination_one_url_or_a_batch_and_a_crawl_passes_it_through():
+    """A one-off job writes where it names (the API's `destination`); left out,
+    the body carries no such key."""
+    arc, http = client([{"id": "r1", "status": "done", "data": [{"url": "https://x.test/"}]}])
+    arc.scrape("https://x.test/", destination="d-1")
+    assert http.calls[0][3]["destination"] == "d-1"
+    arc, http = client([{"id": "b1", "status": "queued"}])
+    arc.scrape(["https://x.test/a", "https://x.test/b"], destination="d-2", wait=False)
+    assert http.calls[0][3]["destination"] == "d-2"
+    arc, http = client([{"id": "r3", "status": "queued"}])
+    arc.scrape_one("https://x.test/", destination="d-3", wait=False)
+    assert http.calls[0][3]["destination"] == "d-3"
+    arc, http = client([{"id": "c2", "status": "queued"}])
+    arc.crawl("https://x.test/", limit=5, destination="d-4")
+    assert http.calls[0][3] == {"url": "https://x.test/", "limit": 5, "destination": "d-4"}
+    arc, http = client([{"id": "r4", "status": "done", "data": [{"url": "https://x.test/"}]}])
+    arc.scrape("https://x.test/")
+    assert "destination" not in http.calls[0][3]
+
+
 def test_a_slow_page_is_polled_not_given_up_on():
     arc, http = client([{"id": "r2", "status": "running"},
                         {"id": "r2", "status": "done", "data": [{"url": "https://x.test/", "markdown": "late"}]}])
