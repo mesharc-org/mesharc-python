@@ -78,7 +78,7 @@ for row in batch["pages"]:
     print(row["url"], row["httpStatus"], row["verdict"], row["credits"])
 ```
 
-`arc.scrape(urls, wait=False)` returns the batch id at once; `arc.batch(id, wait=True)` finishes it later. Pass `webhook_url=` to be told instead of polling (`batch.finished`, signed with a secret returned once).
+`arc.scrape(urls, wait=False)` returns the batch id at once; `arc.batch(id, wait=True)` finishes it later. Pass `webhook_url=` to be told instead of polling (`batch.finished`, signed with a secret returned once). Pass `destination=` (the id of one of the workspace's destinations) to have the pages written to that database, warehouse or bucket when the job is done; `scrape_one()` and `crawl()` take it too.
 
 ### What a page looks like
 

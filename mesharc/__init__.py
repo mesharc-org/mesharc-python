@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl", "AgentRun"]
 TENANT_HEADER = "X-MeshArc-Tenant"
 
@@ -1199,22 +1199,30 @@ class MeshArc:
 
     def scrape(self, urls: Union[str, Iterable[str]], config: Optional[Json] = None,
                webhook_url: Optional[str] = None, formats: str = "markdown", wait: bool = True,
-               poll: float = 3.0, timeout: float = 3600, idempotency_key: Optional[str] = None) -> Json:
+               poll: float = 3.0, timeout: float = 3600, idempotency_key: Optional[str] = None,
+               destination: Optional[str] = None) -> Json:
         """URLs in, their content out; no project.
 
         One URL (a string) returns the page itself: the API holds the
         request open until the page comes back. A list is a batch and
         returns the finished batch, one row per URL, unless ``wait`` is
         False.
+
+        ``destination`` is the id of one of the workspace's destinations --
+        a database, a warehouse, a bucket. When the job is done its pages are
+        written there as well as returned; the job says how the write went
+        under ``destinationSync``.
         """
         if isinstance(urls, str):
             return self.scrape_one(urls, config=config, formats=formats, wait=wait, poll=poll,
-                                   timeout=timeout, idempotency_key=idempotency_key)
+                                   timeout=timeout, idempotency_key=idempotency_key, destination=destination)
         body: Json = {"urls": list(urls)}
         if config:
             body["config"] = config
         if webhook_url:
             body["webhook_url"] = webhook_url
+        if destination:
+            body["destination"] = destination
         batch = self._h("POST", "/scrape", json=body, idempotency_key=idempotency_key)
         if not wait:
             return batch
@@ -1222,17 +1230,20 @@ class MeshArc:
 
     def scrape_one(self, url: str, config: Optional[Json] = None, formats: str = "markdown", wait: bool = True,
                    timeout_s: int = 60, poll: float = 2.0, timeout: float = 600,
-                   idempotency_key: Optional[str] = None) -> Json:
+                   idempotency_key: Optional[str] = None, destination: Optional[str] = None) -> Json:
         """One URL, waited for. Returns the page; ``wait=False`` returns the job envelope.
 
         ``timeout_s`` is how long the API holds the request open for the
         page (60 by default, 120 at most); a slower page comes back as a
         job, which is then polled every ``poll`` seconds for up to
-        ``timeout`` seconds.
+        ``timeout`` seconds. ``destination`` writes the page to one of the
+        workspace's destinations as well, as for ``scrape``.
         """
         body: Json = {"url": url, "formats": formats, "timeout": timeout_s}
         if config:
             body["config"] = config
+        if destination:
+            body["destination"] = destination
         out = self._h("POST", "/scrape", json=body, idempotency_key=idempotency_key)
         if not wait:
             return out
@@ -1287,7 +1298,9 @@ class MeshArc:
         blocks until it finishes. ``opts`` are the request's own names --
         ``limit``, ``maxDepth``, ``includePaths``, ``excludePaths``,
         ``crawlMode``, ``maxAge``, ``maxTier``, ``scrapeOptions``,
-        ``webhook`` -- and ``config`` takes any project setting directly.
+        ``webhook``, ``destination`` -- and ``config`` takes any project
+        setting directly. ``destination`` is the id of one of the workspace's
+        destinations: the crawl's pages are written there when it is done.
 
         ``webhook`` is a URL, or ``{"url", "events", "metadata", "include"}``:
         ``"include": ["markdown"]`` (the one value) puts each page's markdown
