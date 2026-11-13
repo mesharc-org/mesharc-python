@@ -6,6 +6,17 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.7 - 2026-11-13
+
+### Changed
+
+- **`search_web` says how a search is read and charged today.** Results come from Google's results page, and when Google refuses or reads short, from DuckDuckGo's and then Bing's, with the answer that has the most results about the query given and topped up from the others. A search costs at most 4 credits whatever read it; DuckDuckGo's or Bing's page is 1 when its results are used. It no longer says "4 credits or more". A search aims to answer within about 35 seconds.
+- **A limit's notice says whether the tier the page needs is likely to read it.** The API's `outlook` on a page's `limit` (`{tier, likely, why}`) is added to the MCP tools' `notice` line and kept in `notices`, so an assistant does not offer an upgrade with no word of whether it would help.
+
+### Fixed
+
+- **`scrape()` and `scrape_one()` say where a one-URL scrape's `destinationSync` is.** One URL waited for returns only the page, which does not carry it: pass `wait=False` for the job envelope, and `batch(id, wait=True)` reads it once the job is done. 0.7.6's docstring said "the job says", without that.
+
 ## 0.7.6 - 2026-11-13
 
 ### Added

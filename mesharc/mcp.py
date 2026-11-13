@@ -177,8 +177,9 @@ class ScrapeOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
-        "the plan that reads them, null for credits or a cap the workspace set itself."))]
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
+        "workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -226,8 +227,9 @@ class CrawlOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
-        "the plan that reads them, null for credits or a cap the workspace set itself."))]
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
+        "workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -432,8 +434,9 @@ class JobOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
-        "the plan that reads them, null for credits or a cap the workspace set itself."))]
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
+        "workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -468,7 +471,7 @@ class SearchWebOut(TypedDict, total=False):
         "the query (nothing charged); null when the search did not run because the credits left could not pay "
         "for a results page -- tell the person, as a top-up or a plan change fixes it."))]
     query: Annotated[Any, Field(description="The query as searched.")]
-    engine: Annotated[Any, Field(description="The engine whose results page answered, e.g. 'google' or 'bing'.")]
+    engine: Annotated[Any, Field(description="The engine whose results page answered: 'google', 'duckduckgo' or 'bing'.")]
     cached: Annotated[Any, Field(description=(
         "true when an equal search within the hour answered it, with no charge for the results page."))]
     creditsUsed: Annotated[Any, Field(description="Credits this search spent, scraped pages included.")]
@@ -487,8 +490,9 @@ class SearchWebOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `engine` on a search's; unlockedBy is "
-        "the plan that reads them, null for credits or a cap the workspace set itself."))]
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
+        "workspace set itself."))]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -792,16 +796,33 @@ def _limit_notice(notices=None, page=None):
     person what was held back -- the page needed a plan, the trial ran out,
     the credits ran short -- instead of quietly returning less. `notices`
     keeps what a script would act on, the upgrade link among it.
+
+    A page's limit may carry an `outlook` -- whether the tier it needs is
+    likely to read it, and why (the API since 13 Nov 2026) -- which is said
+    on the line too, so an upgrade is not offered with no word of whether it
+    would help.
     """
     rows = [n for n in (notices or []) if isinstance(n, dict) and n.get("message")]
     if not rows and isinstance(page, dict) and isinstance(page.get("limit"), dict) and page["limit"].get("message"):
         rows = [{**page["limit"], "pages": 1, "examples": [page.get("url", "")]}]
     if not rows:
         return {}
-    return {"notice": " ".join(str(n["message"]) for n in rows),
-            "notices": [{k: n.get(k) for k in ("reason", "pages", "needs", "examples", "unlockedBy", "upgradeUrl", "engine")
-                         if k != "engine" or n.get("engine")}
+    return {"notice": " ".join(str(n["message"]) + _outlook_line(n.get("outlook")) for n in rows),
+            "notices": [{k: n.get(k) for k in ("reason", "pages", "needs", "examples", "unlockedBy", "upgradeUrl",
+                                               "engine", "outlook")
+                         if k not in ("engine", "outlook") or n.get(k)}
                         for n in rows]}
+
+
+def _outlook_line(outlook):
+    """The outlook of a limit as a sentence after its message, or "":
+    {tier, likely: yes | no | unknown, why}."""
+    if not isinstance(outlook, dict) or not outlook.get("tier"):
+        return ""
+    tier, why = outlook["tier"], str(outlook.get("why") or "").rstrip(".")
+    said = {"yes": f"The {tier} tier is likely to read it", "no": f"The {tier} tier is not likely to read it either"}
+    head = said.get(outlook.get("likely"), f"Whether the {tier} tier reads it is not known")
+    return f" {head}{': ' + why if why else ''}."
 
 
 def _with_notice(out, notice):
@@ -1533,19 +1554,23 @@ def _shape_search(out, hits, running, reserve):
 @tool(title="Search the web",
       annotations=_acts(),
       description="Search the web for a query and return the ranked results, each with its title, url and "
-                  "snippet. The results are read from Google's results page, or Bing's when Google refuses.\n"
+                  "snippet. The results are read from Google's results page; when Google refuses or reads short, "
+                  "from DuckDuckGo's and then Bing's, and the answer with most results about the query is given, "
+                  "topped up from the others.\n"
                   "Use it to find pages whose URLs you do not know. It searches the web, unlike list_pages with q, "
                   "which searches inside a project's stored run. For URLs you already have use scrape_urls; "
                   "scrape_urls with full=true reads one result in full.\n"
                   "Inputs: query as typed into a search engine, e.g. 'python http client'. scrape=true also fetches "
                   "each result's page as markdown in the same call. include_domains=['python.org'] keeps the search "
                   "to those sites; exclude_domains drops sites, and an exclude wins.\n"
-                  "Cost: Google's results page is read with a browser, 4 credits or more where it needs the stealth "
-                  "tier; Bing's, used when Google refuses, is a plain fetch at 1. A results page the engines refused "
-                  "is free. An equal search (same query, country, lang, freshness and domains) within an hour of a "
-                  "finished one comes from cache with no charge for the results page. Scraped pages are charged, "
-                  "cached or not.\n"
-                  "Timing: it waits for the results. If a search outlasts the connection's time limit, a job comes "
+                  "Cost: at most 4 credits a search, whatever read it: Google's results page, and DuckDuckGo's or "
+                  "Bing's at 1 each when their results are used, within those 4. A results page an engine refused, "
+                  "or one about something else, is free. An equal search (same query, country, lang, freshness and "
+                  "domains) within an hour of a finished one comes from cache with no charge for the results page. "
+                  "Scraped pages are charged, cached or not.\n"
+                  "Timing: it waits for the results. A search aims to answer within about 35 seconds; a retry on the "
+                  "residential browser after Google's wall can take longer. If a search outlasts the connection's "
+                  "time limit, a job comes "
                   "back for get_job; a scraping search whose pages are still landing returns its results with a "
                   "job for the pages.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
