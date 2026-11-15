@@ -66,7 +66,7 @@ def test_a_crawl_result_keeps_the_budget_it_promises(pages):
     assertion now, and the sizes that broke it are in the list."""
     job = _Job([_page(i) for i in range(pages)])
     out = mcp_mod._crawl_result(job, *mcp_mod._walk(job))
-    size = len(json.dumps(out))
+    size = len(json.dumps(out, ensure_ascii=False))
     assert size <= mcp_mod.RESULT_BUDGET, f"{size:,} characters against a promise of {mcp_mod.RESULT_BUDGET:,}"
     assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS, "an index with nothing to read is not an answer"
     assert all(len(p["markdown"]) >= mcp_mod.EXCERPT_FLOOR for p in out["pages"])
@@ -89,7 +89,7 @@ def test_a_cursor_is_named_only_when_it_is_there(pages):
 def test_fifty_fat_pages_stay_inside_the_budget():
     job = _Job([_page(i) for i in range(50)])
     out = mcp_mod._crawl_result(job, job.pages())
-    size = len(json.dumps(out))
+    size = len(json.dumps(out, ensure_ascii=False))
     assert size <= mcp_mod.RESULT_BUDGET, f"{size} characters is more than promised"
 
     # The links are the single biggest thing that was in here.
@@ -144,7 +144,7 @@ def test_the_budget_buys_fewer_excerpts_rather_than_thinner_ones():
     assert len(many) < mcp_mod.PAGES_CAP, "fewer pages, not a thinner one each"
     assert cap >= mcp_mod.EXCERPT_FLOOR
     assert kept == len(index)
-    assert len(json.dumps(index)) + len(json.dumps(many)) <= mcp_mod.RESULT_BUDGET
+    assert len(json.dumps(index, ensure_ascii=False)) + len(json.dumps(many, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
 
 
 def test_the_cut_note_on_one_page_does_not_ask_for_the_call_just_made():
@@ -157,7 +157,7 @@ def test_the_cut_note_on_one_page_does_not_ask_for_the_call_just_made():
 def test_a_batch_is_shaped_like_a_crawl():
     b = {"id": "b1", "status": "done", "pages": [_page(i) for i in range(50)]}
     out = mcp_mod._batch_result(b)
-    assert len(json.dumps(out)) <= 65_000
+    assert len(json.dumps(out, ensure_ascii=False)) <= 65_000
     assert all(isinstance(p["links"], int) for p in out["pages"])
     assert len(out["index"]) == 50
     assert "scrape_urls" in out["pages"][0]["markdown"]
@@ -275,7 +275,7 @@ def test_a_read_only_connection_is_told_why_rather_than_about_roles(monkeypatch)
 def test_a_connection_with_write_hears_the_api(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_scopes", lambda: ["read", "write"])
     out = mcp_mod._safe(_refuse(403, "this needs the owner role", code="forbidden"))
-    assert out == {"error": "this needs the owner role", "status": 403, "code": "forbidden"}
+    assert out == {"error": "this needs the owner role", "status": 403, "code": "forbidden", "request_id": None}
 
 
 def test_the_other_refusals_keep_saying_what_they_say(monkeypatch):
@@ -286,7 +286,7 @@ def test_the_other_refusals_keep_saying_what_they_say(monkeypatch):
                          ("email_unverified", "verify your email address first"),
                          ("mfa_required", "this workspace requires two-factor authentication")):
         out = mcp_mod._safe(_refuse(403, detail, code=code))
-        assert out == {"error": detail, "status": 403, "code": code}, code
+        assert out == {"error": detail, "status": 403, "code": code, "request_id": None}, code
 
 
 def test_locally_the_server_does_not_guess_at_the_key(monkeypatch):
@@ -295,7 +295,7 @@ def test_locally_the_server_does_not_guess_at_the_key(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_HTTP", False)
     assert mcp_mod._scopes() is None
     out = mcp_mod._safe(_refuse(403, "this needs the member role", code="forbidden"))
-    assert out == {"error": "this needs the member role", "status": 403, "code": "forbidden"}
+    assert out == {"error": "this needs the member role", "status": 403, "code": "forbidden", "request_id": None}
 
 
 def test_an_error_carries_its_code_and_request_id():
@@ -408,7 +408,7 @@ def test_a_big_batch_accounts_for_every_url_inside_the_budget():
                 "words": 1234, "status": "blocked" if i in (300, 420) else "ok", "links": [{"href": "x"}] * 200,
                 "markdown": "w " * 10_000}
     out = mcp_mod._batch_result({"id": "b1", "status": "done", "pages": [page(i) for i in range(500)]})
-    assert len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert len(json.dumps(out, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
     rest = out["rest"]
     assert rest["count"] + len(out["index"]) == 500
     assert rest["byStatus"] == {"ok": rest["count"] - 2, "blocked": 2}
@@ -446,7 +446,7 @@ def test_a_batch_over_many_hosts_keeps_the_budget():
     runs = [{"id": f"{i:032x}", "host": f"host-{i // 5}.example.com", "status": "done", "done": 1, "total": 1,
              "stop": "no more pages to crawl"} for i in range(500)]
     out = mcp_mod._batch_result({"id": "b1", "status": "done", "runs": runs, "pages": pages})
-    assert len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert len(json.dumps(out, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
     assert out["runs"] == {"count": 500, "byStatus": {"done": 500}}
     assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS
 
@@ -468,7 +468,7 @@ def test_long_urls_still_leave_room_for_five_excerpts():
                 "markdown": "w " * 10_000}
     job = _Job([page(i) for i in range(500)])
     out = mcp_mod._crawl_result(job, job.pages())
-    assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS and len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert len(out["pages"]) >= mcp_mod.MIN_EXCERPTS and len(json.dumps(out, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
 
 
 # --- web_search, waited for down a pipe and bounded hosted ----------------
@@ -517,7 +517,7 @@ def test_ten_scraped_results_stay_inside_the_budget(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
     monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
     out = mcp_mod.search_web("q", scrape=True)
-    size = len(json.dumps(out))
+    size = len(json.dumps(out, ensure_ascii=False))
     assert size <= mcp_mod.RESULT_BUDGET, f"{size:,} characters against a promise of {mcp_mod.RESULT_BUDGET:,}"
     assert len(out["results"]) == 10
     assert all(isinstance(r["page"]["links"], int) for r in out["results"])
@@ -599,7 +599,7 @@ def test_hosted_web_search_asks_once_inside_its_budget(monkeypatch):
     arc = _Searches(_search(status="error", error="every engine failed"))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
     out = mcp_mod.search_web("q")
-    assert out == {"error": "every engine failed", "status": 502, "code": "job_failed"}
+    assert out == {"error": "every engine failed", "status": 502, "code": "job_failed", "request_id": None}
 
 
 def test_a_hosted_search_handed_back_as_a_job_says_how_long_it_waited(monkeypatch):
@@ -633,7 +633,7 @@ def test_get_job_follows_a_search(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_client",
                         lambda: _Searches(_search(status="error", error="every engine failed")))
     out = mcp_mod.get_job("search", "s1")
-    assert out == {"error": "every engine failed", "status": 502, "code": "job_failed"}
+    assert out == {"error": "every engine failed", "status": 502, "code": "job_failed", "request_id": None}
 
 
 # --- run_agent, and an agent run through get_job and cancel_job ----------
@@ -863,7 +863,7 @@ def test_a_huge_agent_answer_stays_inside_the_budget(monkeypatch, chars):
     huge = _agent_env("done", data={"text": text}, sources=sources)
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Agents(now=[huge]))
     out = mcp_mod.get_job("agent", "a1")
-    size = len(json.dumps(out))
+    size = len(json.dumps(out, ensure_ascii=False))
     assert size <= mcp_mod.RESULT_BUDGET, f"{size:,} characters against a promise of {mcp_mod.RESULT_BUDGET:,}"
     assert len(out["sources"]) == mcp_mod.AGENT_SOURCES_CAP and out["sources"] == sources[:50]
     assert isinstance(out["data"], str) and out["data"].startswith('{"text": "')
@@ -879,7 +879,7 @@ def test_many_sources_alone_are_cut_and_the_answer_kept(monkeypatch):
     many = _agent_env("done", data={"text": "short"}, sources=sources)
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Agents(now=[many]))
     out = mcp_mod.get_job("agent", "a1")
-    assert len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert len(json.dumps(out, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
     assert out["data"] == {"text": "short"}, "the answer is cut last"
     assert len(out["sources"]) == 50 and "first 50 of 800" in out["note"] and "get_agent" in out["note"]
 
@@ -912,7 +912,7 @@ def test_field_sources_are_left_out_first_when_the_answer_is_too_long(monkeypatc
     env = _agent_env("done", data=data, sources=sources, fieldSources=fields)
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Agents(now=[env]))
     out = mcp_mod.get_job("agent", "a1")
-    assert len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert len(json.dumps(out, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
     assert "fieldSources" not in out
     assert out["data"] == data and out["sources"] == sources, "the answer and all 80 sources are kept"
     assert "fieldSources is left out" in out["note"] and "sources lists" not in out["note"]
@@ -925,7 +925,7 @@ def test_a_huge_answer_with_field_sources_loses_them_and_then_the_rest(monkeypat
     huge = _agent_env("done", data={"text": "x" * 200_000}, sources=sources, fieldSources=_field_sources(400))
     monkeypatch.setattr(mcp_mod, "_client", lambda: _Agents(now=[huge]))
     out = mcp_mod.get_job("agent", "a1")
-    assert len(json.dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert len(json.dumps(out, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
     assert "fieldSources" not in out and len(out["sources"]) == 50 and isinstance(out["data"], str)
     assert ("fieldSources is left out, sources lists the first 50 of 500 and data is the answer's JSON text, cut"
             in out["note"])
@@ -1078,12 +1078,13 @@ def test_continue_agent_answers_an_unknown_or_expired_run_with_its_code(monkeypa
     arc = _Agents(raises=MeshArcError(status, detail, code))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
     out = mcp_mod.continue_agent("a1")
-    assert out == {"error": detail, "status": status, "code": code}
+    assert out == {"error": detail, "status": status, "code": code, "request_id": None}
     assert [c[0] for c in arc.calls] == ["get_agent"], "nothing is continued"
     # Past its keep date at the continue itself, too.
     arc = _Agents(now=[_stopped()], continue_raises=MeshArcError(status, detail, code))
     monkeypatch.setattr(mcp_mod, "_client", lambda: arc)
-    assert mcp_mod.continue_agent("a1") == {"error": detail, "status": status, "code": code}
+    assert mcp_mod.continue_agent("a1") == {"error": detail, "status": status, "code": code,
+                                             "request_id": None}
 
 
 def test_continue_agent_on_a_read_only_connection_says_so(monkeypatch):

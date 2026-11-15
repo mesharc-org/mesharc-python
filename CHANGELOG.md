@@ -6,6 +6,22 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **`search_web` refuses a `limit` outside 1 to 10 instead of changing it.** `limit=0` ran as a paid one-result search; it is now refused before anything is sent, as the API refuses it.
+- **`create_monitor` gives one message per mistake.** A search monitor with no `query` is told it needs one, and `prompt` or `follow_rows` on a search monitor (or `query` on an agent monitor) each say what they are for, instead of one message for all three.
+- **`create_project` and `update_project` answer with only the settings that differ from the defaults**, with a `configNote` saying so; `get_project` still lists every setting.
+- **`MeshArc.scrape` sends `formats` when it starts a batch.** The pages of a batch were read without them, so `formats="markdown,text"` across several URLs came back with no text.
+- **Every row of a multi-page answer carries every body that was asked for**, each excerpted the same way; rows used to keep markdown only.
+- **Every error a tool builds itself carries `status` (400) and `code`**, with `request_id` null since no request was sent; an unexpected failure is `status: 500, code: "internal"`.
+- **`run_agent` says what a run typically costs** (40-130 credits for a question answered from one page) **and spends at most 500 credits unless told otherwise**; the API's own default stays 2,000.
+- **`scrape_urls` says how to scroll and take a screenshot**: `{"type": "scroll", "repeat": 5}`, and `formats="markdown,screenshot"` for a picture given as `screenshotUrl`.
+- **The server starts faster when the API is slow**: it waits at most 1.5 s, not 5, to learn whether the API runs agents.
+
+### Added
+
+- **`archive_project`**, for a connection that cannot delete (a connected app never has admin): the project stops running, no longer counts toward the plan's projects, and is deleted after 30 days unless restored in the app. `delete_project`'s `admin_only` answer now points to it. `MeshArc.projects.archive()` and `.restore()` do the same from the SDK.
+
 ## 0.7.7 - 2026-11-13
 
 ### Changed

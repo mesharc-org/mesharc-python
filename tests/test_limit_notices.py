@@ -111,7 +111,7 @@ def test_a_crawl_answer_with_a_notice_still_keeps_its_budget():
     from test_results import _Job, _page
     pages = [_page(i) for i in range(500)]
     out = mcp_mod._crawl_result(_Job(pages, envelope={"notices": [NOTICE, {**NOTICE, "reason": "credits_left"}]}), pages)
-    assert out["notice"] and len(__import__("json").dumps(out)) <= mcp_mod.RESULT_BUDGET
+    assert out["notice"] and len(__import__("json").dumps(out, ensure_ascii=False)) <= mcp_mod.RESULT_BUDGET
 
 
 def test_one_scraped_page_leads_with_its_own_limit(monkeypatch):

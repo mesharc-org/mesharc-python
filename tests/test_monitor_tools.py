@@ -172,3 +172,85 @@ def test_create_project_puts_its_caps_in_the_config_and_sets_them_on_a_kept_craw
     assert client.projects.created[1] == ("example.org", None)
     out = mcp_mod.create_project(crawl_id="c1", max_credits_per_month=500)
     assert client.projects.updated == [("p9", {"config": {"max_credits_per_month": 500}})] and out["id"] == "p9"
+
+
+def test_each_wrong_input_for_a_monitor_gets_its_own_message(client):
+    # QA of 14 Nov, #21: a missing query was told "takes query, not prompt or follow_rows".
+    said = [mcp_mod.create_monitor("search", "daily")["error"],
+            mcp_mod.create_monitor("search", "daily", query="q", prompt="p")["error"],
+            mcp_mod.create_monitor("search", "daily", query="q", follow_rows=True)["error"],
+            mcp_mod.create_monitor("agent", "daily")["error"],
+            mcp_mod.create_monitor("agent", "daily", prompt="p", query="q")["error"]]
+    assert said[0].startswith("a search monitor needs query")
+    assert "prompt is for kind 'agent'" in said[1] and "follow_rows is for kind 'agent'" in said[2]
+    assert said[3].startswith("an agent monitor needs prompt") and "query is for kind 'search'" in said[4]
+    assert len(set(said)) == 5 and client.monitors.made == []
+
+
+class _LeanProjects(_Projects):
+    def update(self, project_id, **fields):
+        self.updated.append((project_id, fields))
+        return {"id": project_id, "config": {"max_pages": 200, "render_js": "auto", "include_paths": []}}
+
+
+class _MetaClient(_Client):
+    def __init__(self, defaults):
+        super().__init__()
+        self.projects, self._defaults = _LeanProjects(), defaults
+
+    def meta(self):
+        if self._defaults is None:
+            raise MeshArcError(503, "unavailable")
+        return {"configDefaults": self._defaults}
+
+
+def test_update_project_answers_with_only_the_settings_that_differ_from_the_defaults(monkeypatch):
+    # QA of 14 Nov, #22: every answer carried the whole ~80-key config.
+    c = _MetaClient({"max_pages": 100, "render_js": "auto", "include_paths": []})
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.update_project("p1", config={"max_pages": 200})
+    assert out["config"] == {"max_pages": 200} and "get_project shows them all" in out["configNote"]
+
+
+def test_update_project_keeps_the_whole_config_when_the_defaults_cannot_be_read(monkeypatch):
+    c = _MetaClient(None)
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    out = mcp_mod.update_project("p1", config={"max_pages": 200})
+    assert len(out["config"]) == 3 and "configNote" not in out
+
+
+def test_search_web_bounds_its_limit_instead_of_clamping_it():
+    # QA of 14 Nov, #9: limit=0 ran as a paid limit=1 search.
+    import inspect
+    from annotated_types import Ge, Le
+    meta = inspect.signature(mcp_mod.search_web).parameters["limit"].annotation.__metadata__[0].metadata
+    assert Ge(1) in meta and Le(10) in meta
+    assert "max(1, min(limit" not in inspect.getsource(mcp_mod.search_web)
+
+
+class _ArchiveProjects(_Projects):
+    def __init__(self):
+        super().__init__()
+        self.archived = []
+
+    def get(self, project_id):
+        return {"id": project_id, "name": "qa test"}
+
+    def archive(self, project_id):
+        self.archived.append(project_id)
+        return {"id": project_id, "name": "qa test", "archived": True, "purgeAt": "2026-12-15T00:00:00Z"}
+
+
+def test_archive_project_archives_only_when_the_name_matches(monkeypatch):
+    # QA of 14 Nov, #23: a connected app cannot delete, so it archives instead.
+    c = _Client()
+    c.projects = _ArchiveProjects()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    wrong = mcp_mod.archive_project("p1", confirm_name="not it")
+    assert wrong["code"] == "validation" and c.projects.archived == []
+    out = mcp_mod.archive_project("p1", confirm_name="qa test")
+    assert c.projects.archived == ["p1"] and out["archived"] is True and "2026-12-15" in out["note"]
+
+
+def test_the_admin_only_answer_points_to_archive_project():
+    assert "archive_project" in mcp_mod.ADMIN_ONLY
