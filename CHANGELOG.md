@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.8 - 2026-11-15
+
 ### Changed
 
 - **`search_web` refuses a `limit` outside 1 to 10 instead of changing it.** `limit=0` ran as a paid one-result search; it is now refused before anything is sent, as the API refuses it.
