@@ -6,6 +6,15 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **`screenshot_url` returns a picture of a page**, as image content, with its title and what it cost (5 credits: the browser and the picture). It takes `viewport` (`desktop` or `mobile`), browser `actions` run first, and `wait_ms`. When no picture comes back it answers `code: "no_screenshot"` with the browser's reason, which the API now gives as a page's `screenshotError`.
+- **`MeshArc.screenshot(run_id)`** reads a one-URL scrape's or extract's picture as bytes.
+
+### Changed
+
+- **`list_projects` says which projects are archived**: each row carries `archived` and `purgeAt`. An archived project is listed until it is deleted, and read as a live draft.
+
 ## 0.7.8 - 2026-11-15
 
 ### Changed

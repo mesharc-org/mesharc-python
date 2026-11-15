@@ -216,7 +216,10 @@ class _Http:
                 time.sleep(min(left, 60.0))
             self._remaining = None
 
-    def __call__(self, method: str, path: str, idempotency_key: Optional[str] = None, **kw: Any) -> Any:
+    def __call__(self, method: str, path: str, idempotency_key: Optional[str] = None, as_bytes: bool = False,
+                 **kw: Any) -> Any:
+        # `as_bytes`: the body as it came (an image), not JSON -- with the same
+        # pacing, retries and errors as every other call.
         if idempotency_key:
             kw.setdefault("headers", {})["Idempotency-Key"] = str(idempotency_key)
         # A GET or DELETE is safe to repeat; a POST only when it carries an idempotency key.
@@ -249,7 +252,7 @@ class _Http:
                 raise self._error(r)
             if r.status_code == 204 or not r.content:
                 return None
-            return r.json()
+            return r.content if as_bytes else r.json()
 
     @staticmethod
     def _backoff(attempt: int) -> float:
@@ -1186,6 +1189,12 @@ class MeshArc:
         of the sub-account's parent, not held to some projects, may do this;
         any other id is a 404. Each use is logged. Close it when done."""
         return MeshArc(self._key, self._base, self._timeout, self._max_retries, tenant=sub_account_id)
+
+    def screenshot(self, run_id: str) -> bytes:
+        """The JPEG a one-URL scrape or extract took (``formats`` with
+        ``screenshot``), by the run id on its answer. A run that took none
+        is a 404 (``MeshArcError``); its page's ``screenshotError`` says why."""
+        return self._h("GET", f"/playground/{run_id}/screenshot", as_bytes=True) or b""
 
     def extract(self, url: str, config: Optional[Json] = None, wait: bool = True, poll: float = 2.0,
                 timeout: float = 300) -> Json:

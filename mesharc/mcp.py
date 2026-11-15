@@ -43,8 +43,8 @@ from itertools import islice
 from typing import Annotated, Any, Literal
 
 try:
-    from mcp.server.mcpserver import MCPServer
-    from mcp.types import ToolAnnotations
+    from mcp.server.mcpserver import Image, MCPServer
+    from mcp.types import CallToolResult, TextContent, ToolAnnotations
     from pydantic import ConfigDict, Field, with_config
     from typing_extensions import TypedDict
 except ImportError as exc:  # pragma: no cover
@@ -293,11 +293,29 @@ class DeleteOut(TypedDict, total=False):
 
 
 @with_config(ConfigDict(extra="allow"))
+class ScreenshotOut(TypedDict, total=False):
+    """A picture of one page: the JPEG comes as image content beside this."""
+    url: Annotated[Any, Field(description="The page pictured.")]
+    id: Annotated[Any, Field(description="The extraction's id; get_job(kind='extract', id=...) reads the page.")]
+    title: Annotated[Any, Field(description="The page's title.")]
+    pageStatus: Annotated[Any, Field(description="ok, thin, blocked or error: how the page read.")]
+    credits: Annotated[Any, Field(description="What the page and its picture cost.")]
+    bytes: Annotated[Any, Field(description="The picture's size in bytes.")]
+    error: Annotated[Any, Field(description=_ERR)]
+    status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
+    code: Annotated[Any, Field(description=(
+        "Only on a failure: no_screenshot (the browser gave no picture; error says why), or the API's code."))]
+    request_id: Annotated[Any, Field(description="Only on a failure: the API's request id, null when none was sent.")]
+    detail: Annotated[Any, Field(description=_DETAIL)]
+
+
+@with_config(ConfigDict(extra="allow"))
 class ProjectsOut(TypedDict, total=False):
     """Every project the key can see."""
     projects: Annotated[Any, Field(description=(
-        "Oldest first, each {id, name, seed, host, schedule, pages, coverage, lastRun, status}; status is draft, "
-        "crawling, healthy or failing."))]
+        "Oldest first, each {id, name, seed, host, schedule, pages, coverage, lastRun, status, archived, purgeAt}; "
+        "status is draft, crawling, healthy or failing. archived true: it runs no more and is deleted on purgeAt "
+        "unless restored in the MeshArc app."))]
     workspace: Annotated[Any, Field(description=(
         "{plan, creditsLeft, creditsSpentThisMonth, oneTimeAllowance}: creditsLeft is what may still be spent, "
         "this month or, on a one-time allowance, ever; null means no limit. {note} instead when the balance could "
@@ -1459,6 +1477,66 @@ def scrape_urls(urls: Annotated[list[str], Field(
     return _safe(go)
 
 
+@tool(title="Take a screenshot of a page",
+      annotations=_acts(),
+      description="Render one page in a browser and return a picture of it (JPEG, the visible window), with its "
+                  "title and what it cost.\n"
+                  "Use it to see a page as a person would: its layout, a chart, a banner, what a page looks like "
+                  "after browser steps. For the page's text use scrape_urls; its formats=\"markdown,screenshot\" "
+                  "gives a link to the picture instead of the picture.\n"
+                  "Inputs: url, one absolute http(s) URL. viewport 'mobile' renders as a phone. actions are browser "
+                  "steps run first, as in scrape_urls' config, e.g. [{\"type\": \"click\", \"selector\": "
+                  "\"#accept\"}] or [{\"type\": \"scroll\", \"times\": 3}]. wait_ms waits that long after the steps.\n"
+                  "Cost: 4 credits for the browser, +1 for the picture. A render that gives no picture still "
+                  "costs its 4. A page the site refuses is reported as blocked and is free.\n"
+                  "Errors: no picture comes back with code 'no_screenshot' and the reason the browser gave.\n"
+                  "Needs write access; a read-only connection is refused with code 'read_only'.")
+def screenshot_url(url: Annotated[str, Field(description="The absolute http(s) URL to picture.")],
+                   viewport: Annotated[Literal["desktop", "mobile"], Field(
+                       description="'desktop' (default) or 'mobile', a phone's window and identity.")] = "desktop",
+                   actions: Annotated[list[dict] | None, Field(
+                       description="Browser steps run before the picture, as config.actions takes them; omit for "
+                                   "none.")] = None,
+                   wait_ms: Annotated[int, Field(
+                       description="Milliseconds to wait after the steps, 0 to 10,000 (default 0).", ge=0,
+                       le=10_000)] = 0) -> ScreenshotOut:
+    def go():
+        cfg: dict = {"render_js": "always", "formats": ["markdown", "screenshot"], "viewport": viewport}
+        if actions:
+            cfg["actions"] = actions
+        if wait_ms:
+            cfg["wait_ms"] = wait_ms
+        budget = _budget()
+        with _client() as s:
+            try:
+                r = s.extract(url, config=cfg) if budget is None else s.extract(url, config=cfg, timeout=budget)
+            except MeshArcTimeoutError as exc:
+                if budget is None:
+                    raise
+                return _still_running("extract", getattr(exc, "job_id", "") or "")
+            page = (r or {}).get("page") or {}
+            run_id = (r or {}).get("id") or ""
+            about = {"url": url, "id": run_id, "title": (page.get("head") or {}).get("title") or "",
+                     "pageStatus": page.get("pageStatus") or page.get("status"), "credits": page.get("credits")}
+            if not page.get("screenshot"):
+                # Said with the browser's own reason (the API's screenshotError),
+                # never a bare false: the screenshot that never came back on
+                # every page gave nothing to act on (TM, 15 Nov 2026).
+                why = page.get("screenshotError") or (r or {}).get("error") or page.get("reason") or \
+                    "the page was not rendered"
+                return {**about, "error": f"no screenshot was taken: {why}", "status": 502,
+                        "code": "no_screenshot", "request_id": None}
+            data = s.screenshot(run_id)
+            about["bytes"] = len(data)
+            # The picture as image content, and the rest as the answer the
+            # tool declares (ScreenshotOut), both in one result.
+            return CallToolResult(
+                content=[Image(data=data, format="jpeg").to_image_content(),
+                         TextContent(type="text", text=json.dumps(about))],
+                structuredContent=about)
+    return _safe(go)
+
+
 @tool(title="Map a site's declared URLs",
       annotations=_acts(),
       description="List the URLs a site declares in its sitemaps (found through robots.txt and the well-known "
@@ -2190,7 +2268,11 @@ def list_projects() -> ProjectsOut:
         # was expected (MCP testing, 10 Nov 2026).
         out: dict = {"projects": [
             {**{k: p.get(k) for k in ("id", "name", "seed", "host", "schedule", "coverage", "lastRun", "status")},
-             "pages": _counts(p).get("pages")}
+             "pages": _counts(p).get("pages"),
+             # An archived project is still listed until it is deleted; without
+             # these it read as a live draft, and archive_project as having done
+             # nothing (TM, 15 Nov 2026).
+             "archived": bool(p.get("archived")), "purgeAt": p.get("purgeAt")}
             for p in s.projects.list()]}
         # The balance rides along so an assistant can check it before a
         # large crawl rather than learn it from a 402. It is an extra: no
