@@ -15,6 +15,10 @@ All notable changes to this package are recorded here. The format follows
 
 - **`list_projects` says which projects are archived**: each row carries `archived` and `purgeAt`. An archived project is listed until it is deleted, and read as a live draft.
 
+## 0.7.8 - 2026-11-15
+
+### Changed
+
 - **`search_web` refuses a `limit` outside 1 to 10 instead of changing it.** `limit=0` ran as a paid one-result search; it is now refused before anything is sent, as the API refuses it.
 - **`create_monitor` gives one message per mistake.** A search monitor with no `query` is told it needs one, and `prompt` or `follow_rows` on a search monitor (or `query` on an agent monitor) each say what they are for, instead of one message for all three.
 - **`create_project` and `update_project` answer with only the settings that differ from the defaults**, with a `configNote` saying so; `get_project` still lists every setting.
