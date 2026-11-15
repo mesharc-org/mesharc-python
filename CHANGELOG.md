@@ -6,7 +6,14 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **`screenshot_url` returns a picture of a page**, as image content, with its title and what it cost (5 credits: the browser and the picture). It takes `viewport` (`desktop` or `mobile`), browser `actions` run first, and `wait_ms`. When no picture comes back it answers `code: "no_screenshot"` with the browser's reason, which the API now gives as a page's `screenshotError`.
+- **`MeshArc.screenshot(run_id)`** reads a one-URL scrape's or extract's picture as bytes.
+
 ### Changed
+
+- **`list_projects` says which projects are archived**: each row carries `archived` and `purgeAt`. An archived project is listed until it is deleted, and read as a live draft.
 
 - **`search_web` refuses a `limit` outside 1 to 10 instead of changing it.** `limit=0` ran as a paid one-result search; it is now refused before anything is sent, as the API refuses it.
 - **`create_monitor` gives one message per mistake.** A search monitor with no `query` is told it needs one, and `prompt` or `follow_rows` on a search monitor (or `query` on an agent monitor) each say what they are for, instead of one message for all three.
