@@ -242,7 +242,10 @@ class ProjectOut(TypedDict, total=False):
     host: Annotated[Any, Field(description="The site it covers; fixed at creation.")]
     scheduleKey: Annotated[Any, Field(description="manual, hourly, daily or weekly.")]
     config: Annotated[Any, Field(description=(
-        "Its settings as {key: value}; secrets such as chat_url come back masked."))]
+        "Its settings as {key: value}; secrets such as chat_url come back masked. create_project and "
+        "update_project list only the settings that differ from the defaults; get_project lists them all."))]
+    configNote: Annotated[Any, Field(description=(
+        "create_project and update_project only: says that config lists only the non-default settings."))]
     retention: Annotated[Any, Field(description="How long runs are kept, e.g. '90d'.")]
     pages: Annotated[Any, Field(description="Pages its last finished run read, a number.")]
     coverage: Annotated[Any, Field(description=(
@@ -912,6 +915,25 @@ def _extract_result(r, cfg=None):
     return _with_notice(r, _limit_notice(page=r.get("page")))
 
 
+def _lean_config(s, project):
+    """A project as create_project and update_project answer with it: config
+    holds only the settings that differ from the defaults. Every call
+    returned all ~80 keys, nearly all defaults, so the setting just changed
+    was hard to find (QA of 14 Nov, #22). get_project still shows them all.
+    Left whole when the defaults cannot be read."""
+    if not isinstance(project, dict) or not isinstance(project.get("config"), dict):
+        return project
+    try:
+        defaults = s.meta().get("configDefaults") or {}
+    except Exception:  # noqa: BLE001 -- a shorter answer is a nicety; the change itself was made
+        return project
+    if not defaults:
+        return project
+    project["config"] = {k: v for k, v in project["config"].items() if k not in defaults or defaults[k] != v}
+    project["configNote"] = "only the settings that differ from the defaults; get_project shows them all"
+    return project
+
+
 def _whole(shown, rows, kept, cap):
     """Whether the excerpts are every page read, none of them cut: then the
     index is the same list again, and is left out (MCP re-test 7, 12 Nov
@@ -1578,7 +1600,7 @@ def search_web(query: Annotated[str, Field(
                    description="What to search the web for, 1 to 400 characters, as it would be typed into a "
                                "search engine.")],
                limit: Annotated[int, Field(
-                   description="How many results to return, 1 to 10 (default 10).")] = 10,
+                   description="How many results to return, 1 to 10 (default 10).", ge=1, le=10)] = 10,
                country: Annotated[str | None, Field(
                    description="A 2-letter country code to search from, e.g. 'us' or 'de'; omit for the "
                                "default.")] = None,
@@ -1597,7 +1619,9 @@ def search_web(query: Annotated[str, Field(
                    description="true also fetches each result's page as markdown; each page costs credits. "
                                "false (default) returns the results only.")] = False) -> SearchWebOut:
     def go():
-        opts = {"limit": max(1, min(limit, 10)), "country": country, "lang": lang, "freshness": freshness,
+        # Sent as given: the field's bounds refuse 0 or 50 here, and the API
+        # refuses them too. Clamping ran limit=0 as a paid limit=1 search.
+        opts = {"limit": limit, "country": country, "lang": lang, "freshness": freshness,
                 "include_domains": include_domains or None, "exclude_domains": exclude_domains or None,
                 "scrape": scrape or None}
         # No idempotency key: an equal search within the hour is served from
@@ -1950,14 +1974,23 @@ def create_monitor(kind: Annotated[Literal["search", "agent"], Field(
                        description="A display name; omit for the query or the prompt.")] = None) -> MonitorOut:
     def go():
         if kind == "search":
-            if not (query or "").strip() or prompt or follow_rows:
-                return {"error": "a search monitor takes query, not prompt or follow_rows", "code": "validation"}
+            # One message per mistake: a missing query used to be told
+            # "takes query, not prompt or follow_rows".
+            if not (query or "").strip():
+                return {"error": "a search monitor needs query: what to search for", "code": "validation"}
+            if prompt:
+                return {"error": "prompt is for kind 'agent'; a search monitor takes query only", "code": "validation"}
+            if follow_rows:
+                return {"error": "follow_rows is for kind 'agent'; a search monitor keeps results, not records",
+                        "code": "validation"}
             request: dict = {"query": query}
             if news:
                 request["sources"] = ["news"]
         else:
-            if not (prompt or "").strip() or query:
-                return {"error": "an agent monitor takes prompt, not query", "code": "validation"}
+            if not (prompt or "").strip():
+                return {"error": "an agent monitor needs prompt: the question to ask", "code": "validation"}
+            if query:
+                return {"error": "query is for kind 'search'; an agent monitor takes prompt", "code": "validation"}
             domains = allowed_domains if allowed_domains is not None else (_start_sites(urls) or None)
             request = {"prompt": prompt, **{k: v for k, v in (("urls", urls), ("allowedDomains", domains),
                                                                ("schema", schema), ("maxCredits", max_credits))
@@ -2272,8 +2305,10 @@ def create_project(seed: Annotated[str | None, Field(
                 kept = s.get_crawl(crawl_id).keep(name=name, schedule=schedule)
                 # The caps are budget, not how the crawl read: set on the
                 # project it became, which changes nothing it stored.
-                return s.projects.update(kept["id"], config=caps) if caps and kept.get("id") else kept
-            return s.projects.create(seed, name=name, schedule=schedule, config={**(config or {}), **caps} or None)
+                made = s.projects.update(kept["id"], config=caps) if caps and kept.get("id") else kept
+                return _lean_config(s, made)
+            return _lean_config(s, s.projects.create(seed, name=name, schedule=schedule,
+                                                     config={**(config or {}), **caps} or None))
     return _counts(_safe(go))
 
 
@@ -2315,7 +2350,7 @@ def update_project(project_id: ProjectId,
         if not fields and not test_webhook:
             return {"error": "nothing to change: give a name, a schedule, config or test_webhook"}
         with _client() as s:
-            out = s.projects.update(project_id, **fields) if fields else s.projects.get(project_id)
+            out = _lean_config(s, s.projects.update(project_id, **fields) if fields else s.projects.get(project_id))
             if test_webhook:
                 # After the update, so a URL saved in this same call is the one
                 # tested. A refused test does not undo the change just made.
