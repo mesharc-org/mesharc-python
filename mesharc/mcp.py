@@ -246,6 +246,10 @@ class ProjectOut(TypedDict, total=False):
         "update_project list only the settings that differ from the defaults; get_project lists them all."))]
     configNote: Annotated[Any, Field(description=(
         "create_project and update_project only: says that config lists only the non-default settings."))]
+    archived: Annotated[Any, Field(description=(
+        "true for an archived project: it runs no more and is deleted on purgeAt unless restored."))]
+    archivedAt: Annotated[Any, Field(description="When it was archived (ISO 8601), or null.")]
+    purgeAt: Annotated[Any, Field(description="When an archived project is deleted for good (ISO 8601), or null.")]
     retention: Annotated[Any, Field(description="How long runs are kept, e.g. '90d'.")]
     pages: Annotated[Any, Field(description="Pages its last finished run read, a number.")]
     coverage: Annotated[Any, Field(description=(
@@ -621,6 +625,9 @@ def _build(agents=True, **kw):
     return srv
 
 
+AGENTS_CHECK_S = 1.5
+
+
 def _agents_live():
     """Whether the API this server talks to runs agents, as its /meta says.
     An API that does not say (one older than the field) or cannot be reached
@@ -630,7 +637,11 @@ def _agents_live():
     from . import DEFAULT_BASE
     base = (os.environ.get("MESHARC_API_URL") or DEFAULT_BASE).rstrip("/")
     try:
-        r = httpx.get(base + "/api/v1/meta", timeout=5.0)
+        # A short wait: it runs before the server answers its client, and an
+        # API that takes longer than this is treated as running agents, the
+        # same as one that cannot be reached. At 5 s it could hold a launch
+        # for 5 s (14 Nov 2026 measurements, ~3.5 s per launch in all).
+        r = httpx.get(base + "/api/v1/meta", timeout=AGENTS_CHECK_S)
         flag = r.json().get("agents") if r.status_code == 200 else None
     except Exception:                                      # noqa: BLE001
         return True
@@ -878,17 +889,27 @@ def _summary_page(p, cap, how=""):
     out = _index_row(p)
     links = p.get("links")
     out["links"] = len(links) if isinstance(links, list) else 0
-    body = p.get("markdown")
-    if isinstance(body, str) and body:
-        out["markdown"] = body[:cap]
-        if len(body) > cap:
-            out["markdown"] += (f"\n… [{len(body) - cap} more characters"
-                                + (f"; {how}" if how else "") + "]")
+    # Every body the call asked for, each excerpted the same way: rows kept
+    # markdown only, so formats="markdown,text" across several URLs answered
+    # with no text at all (MCP test, 15 Nov 2026, N3).
+    # The page's cap is shared by its bodies, not given to each: two bodies at
+    # the full cap spent twice what the budget had set aside for the page.
+    bodies = [k for k in ("markdown", "text", "cleanHtml", "html") if isinstance(p.get(k), str) and p.get(k)]
+    share = cap // len(bodies) if bodies else cap
+    for key in bodies:
+        body = p[key]
+        out[key] = body[:share]
+        if len(body) > share:
+            out[key] += (f"\n… [{len(body) - share} more characters"
+                         + (f"; {how}" if how else "") + "]")
     return out
 
 
 def _cost(obj):
-    return len(json.dumps(obj))
+    # Characters as the answer carries them: an accented letter is one, not
+    # the six of its JSON escape, or a page of accented text looked six times
+    # its size and the answer showed three excerpts (review of N3).
+    return len(json.dumps(obj, ensure_ascii=False))
 
 
 def _one_page(page, started=None):
@@ -915,7 +936,7 @@ def _extract_result(r, cfg=None):
     return _with_notice(r, _limit_notice(page=r.get("page")))
 
 
-def _lean_config(s, project):
+def _lean_config(s, project, sent=None):
     """A project as create_project and update_project answer with it: config
     holds only the settings that differ from the defaults. Every call
     returned all ~80 keys, nearly all defaults, so the setting just changed
@@ -929,7 +950,11 @@ def _lean_config(s, project):
         return project
     if not defaults:
         return project
-    project["config"] = {k: v for k, v in project["config"].items() if k not in defaults or defaults[k] != v}
+    # A setting this call sent is shown even when it is the default: update
+    # with render_js "auto" answered config {} and looked ignored (review of #22).
+    keep = set(sent or ())
+    project["config"] = {k: v for k, v in project["config"].items()
+                         if k in keep or k not in defaults or defaults[k] != v}
     project["configNote"] = "only the settings that differ from the defaults; get_project shows them all"
     return project
 
@@ -939,8 +964,16 @@ def _whole(shown, rows, kept, cap):
     index is the same list again, and is left out (MCP re-test 7, 12 Nov
     2026: a two-url scrape carried both `pages` and `index`). The index is
     there for the pages not shown."""
-    return (len(shown) == len(rows) == kept
-            and not any(isinstance(p.get("markdown"), str) and len(p["markdown"]) > cap for p in rows))
+    return len(shown) == len(rows) == kept and not any(_cut(p, cap) for p in rows)
+
+
+def _cut(p, cap):
+    """Whether any body of a page is longer than its share of `cap` (the
+    share _summary_page gives it): a cut text body was missed when only the
+    markdown was looked at (second review of N3)."""
+    bodies = [p[k] for k in ("markdown", "text", "cleanHtml", "html") if isinstance(p.get(k), str) and p.get(k)]
+    share = cap // len(bodies) if bodies else cap
+    return any(len(b) > share for b in bodies)
 
 
 def _excerpts(rows, how, reserve=0):
@@ -1066,7 +1099,7 @@ def _shape_crawl(job, e, rows, window, reserve):
     """One pass at the answer, at the budget `reserve` leaves."""
     shaped, index, cap, kept = _excerpts(rows, "call get_job with this page's url", reserve)
     notes = []
-    if any(isinstance(p.get("markdown"), str) and len(p["markdown"]) > cap for p in rows[:len(shaped)]):
+    if any(_cut(p, cap) for p in rows[:len(shaped)]):
         notes.append("the excerpts are cut: call get_job with this crawl's id and "
                      "url=<a page's url> for that page in full")
     if kept < len(rows):
@@ -1276,15 +1309,34 @@ def _no_secret(out):
     return out
 
 
+# run_agent's budget when the caller names none (#12).
+AGENT_DEFAULT_CREDITS = 500
+
+
+def _error_shape(out):
+    """Every error a tool answers with carries error, status, code and
+    request_id, as the API's do. The ones a tool builds itself before any
+    request (a wrong mix of inputs) had no status and no request_id (MCP
+    test, 15 Nov 2026, N8): they are a 400, and request_id is null since
+    nothing was sent."""
+    # A successful answer can carry "error": "" (a scrape's envelope does).
+    if isinstance(out, dict) and out.get("error") and "status" not in out:
+        out["status"] = 400
+        out.setdefault("code", "validation")
+        out.setdefault("request_id", None)
+    return out
+
+
 def _safe(fn):
     try:
-        return _no_secret(fn())
+        return _error_shape(_no_secret(fn()))
     except MeshArcError as exc:
-        out = {"error": exc.detail, "status": exc.status}
-        if exc.code:
-            out["code"] = exc.code
-        if exc.request_id:
-            out["request_id"] = exc.request_id
+        # Every error carries status, code and request_id (N8). The API was
+        # not reached when the client says status 0 (a timeout, a network
+        # error): 503, with the client's own code and no request id.
+        out = {"error": exc.detail, "status": exc.status or 503,
+               "code": exc.code or ("network" if not exc.status else "error"),
+               "request_id": exc.request_id or None}
         # A 403 carrying the status's own default code is the role check. The
         # named ones -- suspended, email_unverified, mfa_required -- are other
         # refusals and have to keep saying what they say.
@@ -1297,12 +1349,19 @@ def _safe(fn):
         scopes = _scopes()
         if (exc.status == 403 and (exc.code or "") in ("", "forbidden")
                 and scopes is not None and "write" not in scopes):
-            out = {"error": READ_ONLY, "status": 403, "code": "read_only", "detail": exc.detail}
-            if exc.request_id:
-                out["request_id"] = exc.request_id
+            out = {"error": READ_ONLY, "status": 403, "code": "read_only", "detail": exc.detail,
+                   "request_id": exc.request_id or None}
         return out
     except Exception as exc:                          # noqa: BLE001
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        import httpx
+        if isinstance(exc, httpx.TransportError):
+            # The API was not reached at all: no request id to give, and not
+            # this server's own fault (review of N8).
+            return {"error": f"the MeshArc API could not be reached: {exc}", "status": 503, "code": "network",
+                    "request_id": None}
+        if isinstance(exc, ValueError) and "API key is required" in str(exc):
+            return {"error": str(exc), "status": 401, "code": "no_api_key", "request_id": None}
+        return {"error": f"{type(exc).__name__}: {exc}", "status": 500, "code": "internal", "request_id": None}
 
 
 @tool(title="Scrape pages by URL",
@@ -1313,7 +1372,9 @@ def _safe(fn):
                   "Inputs: urls come from the request or from map_site. formats adds bodies, e.g. 'markdown,text'. "
                   "config overrides fetch settings, e.g. {\"render_js\": \"always\"}; get_project with no project_id "
                   "lists the keys. full=true reads one URL in full and runs config.actions first, e.g. [{\"type\": "
-                  "\"click\", \"selector\": \"#load-more\", \"repeat\": \"until_gone\"}].\n"
+                  "\"click\", \"selector\": \"#load-more\", \"repeat\": \"until_gone\"}] or [{\"type\": \"scroll\", "
+                  "\"repeat\": 5}] (each scroll waits for the page to grow); a step's unknown key is refused. "
+                  "formats=\"markdown,screenshot\" also takes a picture of the page; for one URL it is given as screenshotUrl.\n"
                   "Cost: 1 credit for a plain fetch, 4 with a browser, +1 for a screenshot. A page the site refuses "
                   "is reported as blocked and is free. A short page is rendered once to see what its scripts add "
                   "(example.com adds five languages), and kept at 4 when they add text; config {\"render_js\": "
@@ -1327,7 +1388,8 @@ def scrape_urls(urls: Annotated[list[str], Field(
                 config: FetchConfig = None,
                 formats: Annotated[str, Field(
                     description="Bodies per page, comma-separated from markdown (default), text, cleanHtml and "
-                                "rawHtml. With full=true, config's formats list chooses them instead.")]
+                                "rawHtml, plus screenshot for a picture of the page (+1 credit; one URL gives it as screenshotUrl). "
+                                "With full=true, config's formats list chooses them instead.")]
                 = "markdown",
                 parse_documents: ParseDocuments = True,
                 full: Annotated[bool, Field(
@@ -1794,8 +1856,10 @@ def _agent_result(env):
                   "and no allowed_domains it stays on the sites of urls, as a page could tell it to go elsewhere, "
                   "and allowed_domains=[] lets it read any site.\n"
                   "Cost: pages are charged as they are read, and a page the site refuses is free; the model's "
-                  "tokens at the model provider's price plus 20%. max_credits caps the whole run, 2,000 by "
-                  "default; a run that reaches it stops with what it found, and continue_agent carries it on.\n"
+                  "tokens at the model provider's price plus 20%. A question answered from one page typically "
+                  "costs 40-130 credits, most of it the model's tokens, against 1-4 for scrape_urls of that page. "
+                  "max_credits caps the whole run, 500 by default here; a run that reaches it stops with what it "
+                  "found, and continue_agent carries it on.\n"
                   "Timing: it returns at once with a job, as an agent works for minutes. Call "
                   "get_job(kind='agent', id=...) every 30 to 60 seconds; cancel_job stops it. Calling run_agent "
                   "again with the same inputs in the same ten-minute window returns that run, not a new one.\n"
@@ -1814,7 +1878,7 @@ def run_agent(prompt: Annotated[str, Field(
                               "on the sites of urls (or reads any site when there are none); [] lets it read "
                               "any site.")] = None,
               max_credits: Annotated[int | None, Field(
-                  description="The most the run may spend, 1 to 100,000 credits; omit for 2,000.")] = None,
+                  description="The most the run may spend, 1 to 100,000 credits; omit for 500.")] = None,
               max_steps: Annotated[int | None, Field(
                   description="The most steps the agent may take, 1 to 100; omit for 40.")] = None) -> AgentOut:
     def go():
@@ -1828,7 +1892,12 @@ def run_agent(prompt: Annotated[str, Field(
         domains = allowed_domains if allowed_domains is not None else (_start_sites(urls) or None)
         with _client() as s:
             try:
-                run = s.agent(prompt, urls=urls, schema=schema, max_credits=max_credits, max_steps=max_steps,
+                # 500 when not named: the API's own default (2,000) is set for
+                # long research runs, and most questions an assistant hands
+                # over answer from a page or two (#12).
+                run = s.agent(prompt, urls=urls, schema=schema,
+                              max_credits=AGENT_DEFAULT_CREDITS if max_credits is None else max_credits,
+                              max_steps=max_steps,
                               allowed_domains=domains, idempotency_key=key)
             except MeshArcError as exc:
                 # The first request with this key is still being accepted, and
@@ -2306,9 +2375,10 @@ def create_project(seed: Annotated[str | None, Field(
                 # The caps are budget, not how the crawl read: set on the
                 # project it became, which changes nothing it stored.
                 made = s.projects.update(kept["id"], config=caps) if caps and kept.get("id") else kept
-                return _lean_config(s, made)
+                return _lean_config(s, made, sent=caps)
             return _lean_config(s, s.projects.create(seed, name=name, schedule=schedule,
-                                                     config={**(config or {}), **caps} or None))
+                                                     config={**(config or {}), **caps} or None),
+                                sent={**(config or {}), **caps})
     return _counts(_safe(go))
 
 
@@ -2350,7 +2420,8 @@ def update_project(project_id: ProjectId,
         if not fields and not test_webhook:
             return {"error": "nothing to change: give a name, a schedule, config or test_webhook"}
         with _client() as s:
-            out = _lean_config(s, s.projects.update(project_id, **fields) if fields else s.projects.get(project_id))
+            out = _lean_config(s, s.projects.update(project_id, **fields) if fields else s.projects.get(project_id),
+                               sent=config)
             if test_webhook:
                 # After the update, so a URL saved in this same call is the one
                 # tested. A refused test does not undo the change just made.
@@ -2370,8 +2441,9 @@ def update_project(project_id: ProjectId,
 # Said when the key behind a call is not an admin's. A connected app never is:
 # OAuth grants read and write, never admin, so this is the answer every hosted
 # caller gets -- and it has to say where the delete can be done instead.
-ADMIN_ONLY = ("deleting a project needs an admin API key. A connected app never holds one, so delete it in the "
-              "MeshArc app, or run this server locally with an admin key.")
+ADMIN_ONLY = ("deleting a project needs an admin API key. A connected app never holds one: archive_project stops "
+              "it and frees its place in the plan now, and deletes it after 30 days; or delete it in the MeshArc "
+              "app, or run this server locally with an admin key.")
 
 
 @tool(title="Delete a project",
@@ -2404,6 +2476,35 @@ def delete_project(project_id: ProjectId,
         return {"id": project_id, "name": project.get("name"), "deleted": True,
                 "note": "its runs, pages, change records and webhook history were removed"}
     return _safe(go)
+
+
+@tool(title="Archive a project",
+      annotations=_acts(destructive=True, idempotent=True, open_world=False),
+      description="Archive a project: it stops running, no longer counts toward the plan's projects, and is deleted "
+                  "for good after 30 days unless someone restores it in the MeshArc app.\n"
+                  "Use it when the person wants a project gone and delete_project is refused with admin_only -- a "
+                  "connected app never has admin -- or to free a slot after create_project is refused with "
+                  "plan_limit. Nothing is lost on the day it is archived.\n"
+                  "Inputs: project_id from list_projects. confirm_name must repeat the project's name exactly as "
+                  "get_project shows it, or nothing is archived.\n"
+                  "Effect: it answers with the project, archived true and purgeAt the day it goes. Archiving twice "
+                  "keeps the first date. Needs write access; a read-only connection is refused with code "
+                  "'read_only'.")
+def archive_project(project_id: ProjectId,
+                    confirm_name: Annotated[str, Field(
+                        description="The project's name, exactly as get_project shows it.")]) -> ProjectOut:
+    def go():
+        with _client() as s:
+            project = s.projects.get(project_id)
+            if (project.get("name") or "") != confirm_name:
+                return {"error": "confirm_name does not match this project's name, so nothing was archived; read the "
+                                 "name with get_project", "code": "validation"}
+            out = _lean_config(s, s.projects.archive(project_id))
+            if isinstance(out, dict):
+                out["note"] = (f"archived: it runs no more and is deleted on {out.get('purgeAt') or 'its purge date'} "
+                               f"unless restored in the MeshArc app")
+            return out
+    return _counts(_safe(go))
 
 
 @tool(title="Start a project run now",

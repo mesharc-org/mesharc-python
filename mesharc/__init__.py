@@ -309,6 +309,15 @@ class _Projects:
     def delete(self, project_id: str) -> None:
         self._h("DELETE", f"/projects/{project_id}")
 
+    def archive(self, project_id: str) -> Json:
+        """Archive a project: it stops running and stops counting toward the plan's projects, and is
+        deleted for good after 30 days unless restored. Needs write access, not admin."""
+        return self._h("POST", f"/projects/{project_id}/archive")
+
+    def restore(self, project_id: str) -> Json:
+        """Bring an archived project back, its schedule as it was."""
+        return self._h("POST", f"/projects/{project_id}/restore")
+
 
 class _Runs:
     def __init__(self, http: _Http) -> None:
@@ -1218,7 +1227,10 @@ class MeshArc:
         if isinstance(urls, str):
             return self.scrape_one(urls, config=config, formats=formats, wait=wait, poll=poll,
                                    timeout=timeout, idempotency_key=idempotency_key, destination=destination)
-        body: Json = {"urls": list(urls)}
+        # The formats go on the request that starts the batch, not only on the
+        # reads of it: the pages are read with them, and a body not asked for
+        # when they were read (text, say) cannot be returned later.
+        body: Json = {"urls": list(urls), "formats": formats}
         if config:
             body["config"] = config
         if webhook_url:
@@ -1266,13 +1278,17 @@ class MeshArc:
             self._h.pace()
             out = self._h("GET", f"/scrape/{out['id']}", params={"formats": formats})
 
-    def batch(self, batch_id: str, formats: str = "markdown", wait: bool = False, poll: float = 3.0,
+    def batch(self, batch_id: str, formats: Optional[str] = None, wait: bool = False, poll: float = 3.0,
               timeout: float = 3600) -> Json:
         """A batch started earlier. With ``wait``, returns once every row is in,
-        and logs what a limit held back (the batch's ``notices``)."""
+        and logs what a limit held back (the batch's ``notices``). ``formats``
+        left out returns the bodies the batch was started with."""
         deadline = time.time() + timeout
+        # Sent only when named: a default here replaced the formats the batch
+        # was started with, so a batch read back later lost its text.
+        params = {"formats": formats} if formats else None
         while True:
-            r = self._h("GET", f"/scrape/{batch_id}", params={"formats": formats})
+            r = self._h("GET", f"/scrape/{batch_id}", params=params)
             if not wait:
                 return r
             if not _running(r["status"]):

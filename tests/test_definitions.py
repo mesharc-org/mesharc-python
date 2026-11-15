@@ -15,7 +15,7 @@ mcp_mod = pytest.importorskip("mesharc.mcp", reason="needs the mcp extra")
 # Every tool the server offers. Adding one is a line here, not a count to
 # find and bump.
 EXPECTED = {"scrape_urls", "map_site", "crawl_site", "search_web", "list_projects", "get_project",
-            "create_project", "update_project", "delete_project", "list_runs", "list_pages",
+            "create_project", "update_project", "delete_project", "archive_project", "list_runs", "list_pages",
             "get_changes", "start_run", "get_job", "cancel_job", "run_agent", "continue_agent",
             "create_monitor", "list_monitors", "pause_monitor", "get_monitor_rows"}
 
@@ -63,10 +63,11 @@ def test_the_hints_say_which_tools_only_read():
 
 def test_only_the_tools_that_overwrite_or_stop_are_destructive():
     # update_project replaces values; cancel_job stops work that cannot be
-    # resumed where it was; delete_project removes a project and its history.
+    # resumed where it was; delete_project removes a project and its history;
+    # archive_project stops one and schedules its deletion.
     # Nothing else changes what is already there.
     destructive = {n for n, t in _tools().items() if t.annotations.destructive_hint}
-    assert destructive == {"update_project", "cancel_job", "delete_project"}
+    assert destructive == {"update_project", "cancel_job", "delete_project", "archive_project"}
 
 
 def test_fixed_choices_are_listed():

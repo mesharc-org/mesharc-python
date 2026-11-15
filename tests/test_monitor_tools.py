@@ -226,3 +226,31 @@ def test_search_web_bounds_its_limit_instead_of_clamping_it():
     meta = inspect.signature(mcp_mod.search_web).parameters["limit"].annotation.__metadata__[0].metadata
     assert Ge(1) in meta and Le(10) in meta
     assert "max(1, min(limit" not in inspect.getsource(mcp_mod.search_web)
+
+
+class _ArchiveProjects(_Projects):
+    def __init__(self):
+        super().__init__()
+        self.archived = []
+
+    def get(self, project_id):
+        return {"id": project_id, "name": "qa test"}
+
+    def archive(self, project_id):
+        self.archived.append(project_id)
+        return {"id": project_id, "name": "qa test", "archived": True, "purgeAt": "2026-12-15T00:00:00Z"}
+
+
+def test_archive_project_archives_only_when_the_name_matches(monkeypatch):
+    # QA of 14 Nov, #23: a connected app cannot delete, so it archives instead.
+    c = _Client()
+    c.projects = _ArchiveProjects()
+    monkeypatch.setattr(mcp_mod, "_client", lambda: c)
+    wrong = mcp_mod.archive_project("p1", confirm_name="not it")
+    assert wrong["code"] == "validation" and c.projects.archived == []
+    out = mcp_mod.archive_project("p1", confirm_name="qa test")
+    assert c.projects.archived == ["p1"] and out["archived"] is True and "2026-12-15" in out["note"]
+
+
+def test_the_admin_only_answer_points_to_archive_project():
+    assert "archive_project" in mcp_mod.ADMIN_ONLY
