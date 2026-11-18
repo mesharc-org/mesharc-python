@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.9 - 2026-11-18
+
 ### Added
 
 - **`screenshot_url` returns a picture of a page**, as image content, with its title and what it cost (5 credits: the browser and the picture). It takes `viewport` (`desktop` or `mobile`), browser `actions` run first, and `wait_ms`. When no picture comes back it answers `code: "no_screenshot"` with the browser's reason, which the API now gives as a page's `screenshotError`.
