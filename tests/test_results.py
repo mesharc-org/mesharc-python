@@ -525,7 +525,9 @@ def test_ten_scraped_results_stay_inside_the_budget(monkeypatch):
     assert all("call scrape_urls with that url" in r["page"]["markdown"] for r in out["results"])
     (query, kw), = arc.calls
     assert query == "q" and kw["scrape"] is True
-    assert "idempotency_key" not in kw, "a repeat search is a new search by design"
+    # A key of its own, so a dropped connection is retried; random, so a
+    # repeat search is still a new search (tests/test_qa_16nov.py).
+    assert kw["idempotency_key"].startswith("mcp-search-")
 
 
 def test_a_search_with_no_results_says_why(monkeypatch):

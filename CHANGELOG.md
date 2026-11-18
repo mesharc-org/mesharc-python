@@ -6,6 +6,19 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **`search_web` searches news** with `source="news"`: the engines' news results instead of the web's, each also saying who published it (`publisher`) and how old it is (`age`, as the engine put it, e.g. `"20h"`). An equal news search within ten minutes of a finished one comes from the cache. DuckDuckGo has no news page and is not asked.
+
+### Changed
+
+- **`get_changes` explains a pair picked with `against`.** The record's `adHoc`, `crossVersion`, `note`, `readDifferentlyCount` and each feed row's `counted` are described, and passed on as the API sends them: a word count the API left null stays null, never 0. When the API sends no `note` and the two runs were read under different extraction rules, the tool adds one saying so, as pages can then differ without the site changing; from an API older than `note`, it also says that a modified page's 0 words in a picked pair means not counted.
+- **`screenshot_url` names no price for a render that gave no picture.** It answers with `credits` as the API charged them (the job's `creditsUsed`, else the page's own credits), since a missing picture is never charged for the picture and what the render costs is the API's to say.
+
+### Fixed
+
+- **`search_web` survives a dropped connection.** It sent no idempotency key, and the client repeats a POST only with one, so a single network error failed the search (16 Nov 2026). Each call now sends a fresh random key: one call is retried without searching twice, and two calls are still two searches. A retry that finds the first request still being answered (409 `in_flight`) is asked again with the same key, which replays the first answer at no further charge, for up to five minutes run locally and while the wait allows hosted; past that the search comes back as a job for `get_job`, found in the workspace's searches, never as a 409. Hosted, the client no longer sleeps out a `Retry-After` that would end past the wait.
+
 ## 0.7.9 - 2026-11-18
 
 ### Added

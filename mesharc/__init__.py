@@ -27,6 +27,8 @@ import logging
 import os
 import random
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Union
 from urllib.parse import parse_qs, urlparse
@@ -41,6 +43,27 @@ DEFAULT_BASE = "https://api.mesharc.dev"
 DEFAULT_TIMEOUT = 150.0
 DEFAULT_MAX_RETRIES = 2
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
+
+# A time (time.monotonic()) past which no request is retried, for a caller
+# with a wait of its own to keep -- the hosted MCP server, behind a client
+# that gives up after a minute. Unset, retries are as max_retries says.
+_RETRY_UNTIL: ContextVar[Optional[float]] = ContextVar("mesharc_retry_until", default=None)
+
+
+@contextmanager
+def _retry_until(deadline: Optional[float]) -> Iterator[None]:
+    """Inside it, a retry whose wait would end past ``deadline`` is not made:
+    the error is raised instead of sleeping out a Retry-After of a minute."""
+    token = _RETRY_UNTIL.set(deadline)
+    try:
+        yield
+    finally:
+        _RETRY_UNTIL.reset(token)
+
+
+def _in_time(wait: float) -> bool:
+    until = _RETRY_UNTIL.get()
+    return until is None or time.monotonic() + wait < until
 
 Json = Dict[str, Any]
 
@@ -212,6 +235,11 @@ class _Http:
         matters."""
         if self._remaining is not None and self._remaining <= floor:
             left = self._reset_at - time.monotonic()
+            until = _RETRY_UNTIL.get()
+            if until is not None:
+                # Not past a caller's own wait: the request goes, and is
+                # refused or not, rather than the wait being slept away.
+                left = min(left, until - time.monotonic())
             if left > 0:
                 time.sleep(min(left, 60.0))
             self._remaining = None
@@ -232,22 +260,26 @@ class _Http:
             try:
                 r = self._c.request(method, path, **kw)
             except httpx.TimeoutException as exc:
-                if repeatable and attempt < self._max_retries:
+                wait = self._backoff(attempt + 1)
+                if repeatable and attempt < self._max_retries and _in_time(wait):
                     attempt += 1
-                    time.sleep(self._backoff(attempt))
+                    time.sleep(wait)
                     continue
                 raise MeshArcError(0, f"request timed out: {exc}", "timeout") from exc
             except httpx.HTTPError as exc:
-                if repeatable and attempt < self._max_retries:
+                wait = self._backoff(attempt + 1)
+                if repeatable and attempt < self._max_retries and _in_time(wait):
                     attempt += 1
-                    time.sleep(self._backoff(attempt))
+                    time.sleep(wait)
                     continue
                 raise MeshArcError(0, f"network error: {exc}", "network") from exc
             self._note_limits(r)
             if r.status_code in RETRY_STATUSES and repeatable and attempt < self._max_retries:
-                attempt += 1
-                time.sleep(self._retry_after(r) or self._backoff(attempt))
-                continue
+                wait = self._retry_after(r) or self._backoff(attempt + 1)
+                if _in_time(wait):
+                    attempt += 1
+                    time.sleep(wait)
+                    continue
             if r.status_code >= 400:
                 raise self._error(r)
             if r.status_code == 204 or not r.content:
