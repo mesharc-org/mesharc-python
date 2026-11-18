@@ -6,6 +6,8 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+## 0.7.10 - 2026-11-19
+
 ### Added
 
 - **`search_web` searches news** with `source="news"`: the engines' news results instead of the web's, each also saying who published it (`publisher`) and how old it is (`age`, as the engine put it, e.g. `"20h"`). An equal news search within ten minutes of a finished one comes from the cache. DuckDuckGo has no news page and is not asked.
