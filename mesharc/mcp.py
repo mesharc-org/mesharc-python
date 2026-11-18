@@ -39,7 +39,7 @@ import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
-from itertools import islice
+from itertools import count, islice
 from typing import Annotated, Any, Literal
 
 try:
@@ -54,6 +54,8 @@ from mesharc import MeshArc, MeshArcError, MeshArcTimeoutError, __version__
 # The one place that decides whether a job is still going. Listing terminal
 # names here instead meant `error` was missed and failed crawls polled for ever.
 from mesharc import _running
+# How a hosted call keeps the client's retries inside its budget.
+from mesharc import _retry_until
 
 # One page asked for on its own: how much of its body comes back.
 MARKDOWN_CAP = 12_000
@@ -299,7 +301,8 @@ class ScreenshotOut(TypedDict, total=False):
     id: Annotated[Any, Field(description="The extraction's id; get_job(kind='extract', id=...) reads the page.")]
     title: Annotated[Any, Field(description="The page's title.")]
     pageStatus: Annotated[Any, Field(description="ok, thin, blocked or error: how the page read.")]
-    credits: Annotated[Any, Field(description="What the page and its picture cost.")]
+    credits: Annotated[Any, Field(description=(
+        "What this call cost, as the API reported it; with no picture, what the render cost without one."))]
     bytes: Annotated[Any, Field(description="The picture's size in bytes.")]
     error: Annotated[Any, Field(description=_ERR)]
     status: Annotated[Any, Field(description="Only on a failure: the HTTP status code.")]
@@ -408,11 +411,19 @@ class PagesOut(TypedDict, total=False):
 class ChangesOut(TypedDict, total=False):
     """A run's change record against the run before it, or against the run named in `against`."""
     change: Annotated[Any, Field(description=(
-        "{runId, prevRunId, baseline, rebaselined, coverage, degraded, counts {added, modified, removed}, summary, "
-        "feed, fields, withheld}. feed: each changed page as {url, path, kind (added, modified or removed), added "
-        "and removed (words, e.g. '+12'), wordsBefore, wordsAfter}. fields: head and extracted field changes as "
-        "{url, field, before, after}. withheld: removals held back because coverage was under 90%. Each list holds "
-        "up to 200."))]
+        "{runId, prevRunId, baseline, rebaselined, adHoc, crossVersion, note, coverage, degraded, counts {added, "
+        "modified, removed}, readDifferentlyCount, summary, feed, fields, withheld}. adHoc: true for a pair picked "
+        "with against, computed now and stored nowhere. crossVersion: [before, after] when the two runs were read "
+        "under different extraction rules (a settings change, or an update to how MeshArc reads pages), so pages "
+        "can differ without the site changing; null otherwise. note: what such a comparison means, in plain "
+        "words, from the API when it sends one and otherwise added by this tool (an older API's 0 words on a "
+        "picked pair's modified page means not counted); tell the person. readDifferentlyCount: pages read "
+        "differently in the two runs, so not judged changed. feed: each changed page as {url, path, kind (added, "
+        "modified or removed), added and removed (words, e.g. '+12'), addedN and removedN (the same as numbers), "
+        "wordsBefore, wordsAfter}, and counted when the API sends it: counted false with addedN and removedN null "
+        "means the words were not counted, which is not 0. fields: head and extracted field changes as {url, "
+        "field, before, after}. withheld: removals held back because coverage was under 90%, and, from an API "
+        "that sends counted, pages read differently, each with its reason. Each list holds up to 200."))]
     runs: Annotated[Any, Field(description=(
         "The finished runs a record exists for, newest first, for picking another run_id."))]
     error: Annotated[Any, Field(description=_ERR)]
@@ -490,7 +501,8 @@ class SearchWebOut(TypedDict, total=False):
     id: Annotated[Any, Field(description="The search's id: for get_job with kind 'search'.")]
     status: Annotated[Any, Field(description=(
         "'done'; 'blocked' when no engine answered (see `outcome`); 'running' with a `job` "
-        "while it goes on. On an error, the HTTP status code."))]
+        "while it goes on (with only a `note` in the rare case a search whose answer was lost could not be "
+        "found). On an error, the HTTP status code."))]
     outcome: Annotated[Any, Field(description=(
         "With status 'blocked': 'no_results' when every engine refused the results page or had nothing about "
         "the query (nothing charged); null when the search did not run because the credits left could not pay "
@@ -498,19 +510,23 @@ class SearchWebOut(TypedDict, total=False):
     query: Annotated[Any, Field(description="The query as searched.")]
     engine: Annotated[Any, Field(description="The engine whose results page answered: 'google', 'duckduckgo' or 'bing'.")]
     cached: Annotated[Any, Field(description=(
-        "true when an equal search within the hour answered it, with no charge for the results page."))]
+        "true when an equal search within the hour (ten minutes for news) answered it, with no charge for the "
+        "results page."))]
     creditsUsed: Annotated[Any, Field(description="Credits this search spent, scraped pages included.")]
     waitedMs: Annotated[Any, Field(description=(
         "With status 'running': how long, in milliseconds, this call waited for the search before handing "
         "back its job."))]
     results: Annotated[Any, Field(description=(
-        "Up to 10, as ranked, each {position, title, url, snippet, source, engine}; when scraped also `page`, "
+        "Up to 10, as ranked, each {position, title, url, snippet, source, engine}; a news result also "
+        "{publisher, age}, age as the engine put it, e.g. '20h'; when scraped also `page`, "
         "{url, title, words, status, links (a count), markdown excerpt}, the excerpts sharing 60,000 characters."))]
     attempts: Annotated[Any, Field(description="Blocked only: each engine tried, and why it was refused.")]
     job: Annotated[Any, Field(description=(
         "While it is still going: {kind: 'search', id} for get_job. A scraping search can carry its results and "
         "a job for the pages still landing."))]
-    note: Annotated[Any, Field(description="The cache rule, and what to do next when it is still going.")]
+    note: Annotated[Any, Field(description=(
+        "The cache rule, and what to do next when it is still going; with status 'running' and no `job`, that "
+        "the search runs once and where its results are kept."))]
     error: Annotated[Any, Field(description=_ERR)]
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
@@ -1487,9 +1503,11 @@ def scrape_urls(urls: Annotated[list[str], Field(
                   "Inputs: url, one absolute http(s) URL. viewport 'mobile' renders as a phone. actions are browser "
                   "steps run first, as in scrape_urls' config, e.g. [{\"type\": \"click\", \"selector\": "
                   "\"#accept\"}] or [{\"type\": \"scroll\", \"times\": 3}]. wait_ms waits that long after the steps.\n"
-                  "Cost: 4 credits for the browser, +1 for the picture. A render that gives no picture still "
-                  "costs its 4. A page the site refuses is reported as blocked and is free.\n"
-                  "Errors: no picture comes back with code 'no_screenshot' and the reason the browser gave.\n"
+                  "Cost: 4 credits for the browser, +1 for the picture; credits in the answer is what this call "
+                  "cost. A render that gives no picture is never charged for the picture, and credits says what "
+                  "it did cost. A page the site refuses is reported as blocked and is free.\n"
+                  "Errors: no picture comes back with code 'no_screenshot', the reason the browser gave and "
+                  "credits.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
 def screenshot_url(url: Annotated[str, Field(description="The absolute http(s) URL to picture.")],
                    viewport: Annotated[Literal["desktop", "mobile"], Field(
@@ -1516,8 +1534,16 @@ def screenshot_url(url: Annotated[str, Field(description="The absolute http(s) U
                 return _still_running("extract", getattr(exc, "job_id", "") or "")
             page = (r or {}).get("page") or {}
             run_id = (r or {}).get("id") or ""
+            # What the API says it cost, never a figure of this file's: the
+            # price of a render that gave no picture is the API's to set, and
+            # is changing. The job's creditsUsed is the ledger's sum, refunds
+            # and caps applied; the page's credits are its price worked out
+            # again, and are the answer only when the job does not say.
+            credits = (r or {}).get("creditsUsed")
+            if credits is None:
+                credits = page.get("credits")
             about = {"url": url, "id": run_id, "title": (page.get("head") or {}).get("title") or "",
-                     "pageStatus": page.get("pageStatus") or page.get("status"), "credits": page.get("credits")}
+                     "pageStatus": page.get("pageStatus") or page.get("status"), "credits": credits}
             if not page.get("screenshot"):
                 # Said with the browser's own reason (the API's screenshotError),
                 # never a bare false: the screenshot that never came back on
@@ -1654,9 +1680,49 @@ def crawl_site(url: Annotated[str, Field(description="The absolute http(s) URL t
     return _safe(go)
 
 
-SEARCH_NOTE = ("an equal search (same query, country, lang, freshness and domains) within an hour of a "
-               "finished one is answered from cache with no charge for the results page; scraped pages are "
-               "charged. scrape_urls with full=true reads one result in full")
+SEARCH_NOTE = ("an equal search (same query, source, country, lang, freshness and domains) within an hour of a "
+               "finished one (ten minutes for news) is answered from cache with no charge for the results page; "
+               "scraped pages are charged. scrape_urls with full=true reads one result in full")
+# A search_web call whose first request got no answer back (a dropped
+# connection, a gateway error) is retried by the client with the same key. A
+# retry that arrives while the first is still being answered waits up to ten
+# seconds on the API and then hears 409 in_flight, with no search id. The
+# same key asked again replays the first answer, free, for a day -- which an
+# equal search does not promise: the cache skips a search that ran out of
+# time, and slow searches are the ones whose connections drop. So the tool
+# keeps asking with the key: for up to SEARCH_REPLAY_S run locally, and while
+# the budget allows hosted, each ask taking up to SEARCH_ASK_S.
+SEARCH_REPLAY_S = 300.0
+SEARCH_ASK_S = 12.0
+SEARCH_ASK_PAUSE_S = 2.0
+# Only when the search could not be found to hand on as a job.
+SEARCH_ACCEPTING = ("this search's answer was lost on the way back (a dropped connection or a gateway error) and "
+                    "the search was still running when this call had to answer; it runs once, and its results are "
+                    "kept in the workspace's search history. Calling search_web again starts a new search, charged "
+                    "as one")
+
+
+def _search_in_flight(s, query, since):
+    """The search a lost request started, found for get_job: the newest of
+    the workspace's searches with this query, started since this call did
+    (a minute's leeway for the two clocks). None when there is none, or the
+    list cannot be read."""
+    want = " ".join(query.split()).casefold()
+    try:
+        for row in islice(s.searches(q=query, limit=5), 5):
+            if not isinstance(row, dict) or " ".join(str(row.get("query") or "").split()).casefold() != want:
+                continue
+            try:
+                created = datetime.fromisoformat(str(row.get("createdAt") or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if row.get("id") and created.timestamp() >= since - 60:
+                return row["id"]
+    except Exception:                                  # noqa: BLE001 - a lookup that fails falls back to the note
+        return None
+    return None
 
 
 def _search_result(out, running=False):
@@ -1683,7 +1749,10 @@ def _search_result(out, running=False):
 def _shape_search(out, hits, running, reserve):
     """One pass at a search's answer, at the budget `reserve` leaves."""
     how = "call scrape_urls with that url"
-    results = [{k: h.get(k) for k in ("position", "title", "url", "snippet", "source", "engine")}
+    # A news result also says who published it and how old it is; a web
+    # result has neither, and is not given two nulls for them.
+    results = [{**{k: h.get(k) for k in ("position", "title", "url", "snippet", "source", "engine")},
+                **{k: h[k] for k in ("publisher", "age") if h.get(k) is not None}}
                for h in hits]
     paged = [i for i, h in enumerate(hits) if isinstance(h.get("page"), dict)]
     shaped = {"id": out.get("id", ""), "status": out.get("status"), "query": out.get("query", ""),
@@ -1722,19 +1791,23 @@ def _shape_search(out, hits, running, reserve):
                   "Use it to find pages whose URLs you do not know. It searches the web, unlike list_pages with q, "
                   "which searches inside a project's stored run. For URLs you already have use scrape_urls; "
                   "scrape_urls with full=true reads one result in full.\n"
-                  "Inputs: query as typed into a search engine, e.g. 'python http client'. scrape=true also fetches "
+                  "Inputs: query as typed into a search engine, e.g. 'python http client'. source='news' searches "
+                  "the engines' news results instead of the web's, for recent coverage of a company, person or "
+                  "event: each result also says who published it (publisher) and how old it is as the engine put "
+                  "it (age, e.g. '20h'); DuckDuckGo has no news page and is not asked. scrape=true also fetches "
                   "each result's page as markdown in the same call. include_domains=['python.org'] keeps the search "
                   "to those sites; exclude_domains drops sites, and an exclude wins.\n"
                   "Cost: at most 4 credits a search, whatever read it: Google's results page, and DuckDuckGo's or "
                   "Bing's at 1 each when their results are used, within those 4. A results page an engine refused, "
-                  "or one about something else, is free. An equal search (same query, country, lang, freshness and "
-                  "domains) within an hour of a finished one comes from cache with no charge for the results page. "
-                  "Scraped pages are charged, cached or not.\n"
+                  "or one about something else, is free. An equal search (same query, source, country, lang, "
+                  "freshness and domains) within an hour of a finished one, or ten minutes for news, comes from "
+                  "cache with no charge for the results page. Scraped pages are charged, cached or not.\n"
                   "Timing: it waits for the results. A search aims to answer within about 35 seconds; a retry on the "
                   "residential browser after Google's wall can take longer. If a search outlasts the connection's "
                   "time limit, a job comes "
                   "back for get_job; a scraping search whose pages are still landing returns its results with a "
-                  "job for the pages.\n"
+                  "job for the pages. A dropped connection is retried without searching twice, and when the "
+                  "first request is still being answered past the wait, a job comes back for get_job as well.\n"
                   "Needs write access; a read-only connection is refused with code 'read_only'.")
 def search_web(query: Annotated[str, Field(
                    description="What to search the web for, 1 to 400 characters, as it would be typed into a "
@@ -1757,28 +1830,59 @@ def search_web(query: Annotated[str, Field(
                                "exclude wins over an include.")] = None,
                scrape: Annotated[bool, Field(
                    description="true also fetches each result's page as markdown; each page costs credits. "
-                               "false (default) returns the results only.")] = False) -> SearchWebOut:
+                               "false (default) returns the results only.")] = False,
+               source: Annotated[Literal["web", "news"], Field(
+                   description="'web' (default) searches the web's results; 'news' the engines' news results, "
+                               "each with its publisher and age.")] = "web") -> SearchWebOut:
     def go():
         # Sent as given: the field's bounds refuse 0 or 50 here, and the API
         # refuses them too. Clamping ran limit=0 as a paid limit=1 search.
         opts = {"limit": limit, "country": country, "lang": lang, "freshness": freshness,
                 "include_domains": include_domains or None, "exclude_domains": exclude_domains or None,
-                "scrape": scrape or None}
-        # No idempotency key: an equal search within the hour is served from
-        # the API's cache anyway, and a repeat is a new search by design.
+                "scrape": scrape or None, "news": source == "news"}
+        # A fresh key for each call, never one made from the inputs: the SDK
+        # repeats a POST after a dropped connection only with a key, and
+        # without one a single network error failed the search (16 Nov 2026).
+        # Random, so this call is safe to retry and two calls stay two
+        # searches -- a repeat within the hour is the API cache's business.
+        key = "mcp-search-" + uuid.uuid4().hex
         with _client() as s:
             budget = _budget()
-            if budget is None:
-                try:
-                    return _search_result(s.web_search(query, **opts))
-                except MeshArcTimeoutError as exc:
-                    # Past the client's own wait: still going server-side, and
-                    # get_job picks it up, as crawl_site's long crawls are.
-                    return _still_running("search", getattr(exc, "job_id", "") or "")
-            # Hosted: the API holds the request for most of the budget and
-            # answers with whatever it has, never a poll loop down this socket.
-            started = time.monotonic()
-            out = s.web_search(query, wait=False, timeout_s=max(1.0, min(120.0, budget - 5)), **opts)
+            started, since = time.monotonic(), time.time()
+            # Hosted, no retry of the client's may sleep past the budget: the
+            # key makes the POST repeatable, and a Retry-After of a minute
+            # slept out twice ran a call far past what its client waits.
+            ends = started + (SEARCH_REPLAY_S if budget is None else budget)
+            with _retry_until(None if budget is None else ends - 1):
+                for ask in count():
+                    try:
+                        if budget is None:
+                            try:
+                                return _search_result(s.web_search(query, idempotency_key=key, **opts))
+                            except MeshArcTimeoutError as exc:
+                                # Past the client's own wait: still going server-side, and
+                                # get_job picks it up, as crawl_site's long crawls are.
+                                return _still_running("search", getattr(exc, "job_id", "") or "")
+                        # Hosted: the API holds the request for most of the budget and
+                        # answers with whatever it has, never a poll loop down this socket.
+                        # The whole budget for the first ask, what is left after.
+                        left = budget if ask == 0 else ends - time.monotonic()
+                        out = s.web_search(query, wait=False, timeout_s=max(1.0, min(120.0, left - 5)),
+                                           idempotency_key=key, **opts)
+                        break
+                    except MeshArcError as exc:
+                        # Any 409 but in_flight is a refusal, passed on.
+                        if not _key_in_flight(exc):
+                            raise
+                        # Asked again with the same key: the first answer
+                        # once it lands, free, however the search ended.
+                        if ends - time.monotonic() > SEARCH_ASK_S + SEARCH_ASK_PAUSE_S:
+                            time.sleep(SEARCH_ASK_PAUSE_S)
+                            continue
+                        found = _search_in_flight(s, query, since)
+                        if found:
+                            return _still_running("search", found)
+                        return {"status": "running", "note": SEARCH_ACCEPTING}
             if out.get("status") == "error":
                 raise MeshArcError(502, out.get("error") or "the search failed", "job_failed")
             if _running(out.get("status")):
@@ -2710,6 +2814,36 @@ def list_pages(project_id: ProjectId,
     return _safe(go)
 
 
+# What get_changes says of a picked pair the API sent without a note of its
+# own: an API from before `note` passed adHoc and crossVersion on unexplained,
+# and listed every page the two readings told apart as modified, with 0 words.
+PAIR_RULES = ("These two runs were read under different extraction rules (a change to the project's settings, or "
+              "an update to how MeshArc reads pages), so pages can differ without the site changing.")
+PAIR_UNCOUNTED = ("Words are not counted for a modified page of a picked pair here: its 0 words added and removed "
+                  "means not counted, not that none moved.")
+
+
+def _explain_pair(ch):
+    """A picked pair's change record, with a note when the API gave none.
+
+    The API's own note wins. Without one, a pair read under different rules
+    says so, and an API from before the note (no `note` key at all) also
+    says its 0 word counts on modified pages are not counts. The counts are
+    left as the API sent them: a null stays null, never 0."""
+    if not ch.get("adHoc") or ch.get("note"):
+        return
+    said = []
+    if ch.get("crossVersion"):
+        said.append(PAIR_RULES)
+    feed = ch.get("feed") if isinstance(ch.get("feed"), list) else []
+    zeros = any(isinstance(e, dict) and e.get("kind") == "modified" and "counted" not in e
+                and e.get("addedN") == 0 and e.get("removedN") == 0 for e in feed)
+    if "note" not in ch and (ch.get("crossVersion") or zeros):
+        said.append(PAIR_UNCOUNTED)
+    if said:
+        ch["note"] = " ".join(said)
+
+
 @tool(title="Get what changed in a run",
       annotations=READS_STORED,
       description="Report what changed in a project run against the run just before it, or against any run you "
@@ -2722,6 +2856,13 @@ def list_pages(project_id: ProjectId,
                   "is named as newerPartialRun with the id to pass as run_id. against, another run's id from "
                   "list_runs, compares the two directly instead of with the run just before. A run still going "
                   "answers 409.\n"
+                  "A picked pair: with against the comparison is computed on the spot (adHoc true). When the two "
+                  "runs were read under different extraction rules, crossVersion names the two, and pages can "
+                  "differ without the site changing. An API that sends note says so itself, lists such pages as "
+                  "read differently (readDifferentlyCount) rather than as modified, and gives a page whose words "
+                  "were not counted counted=false and null word counts, never 0. From an older API, which sends "
+                  "neither note nor counted, this tool adds a note of its own, saying also that a modified page's "
+                  "0 words there means not counted. Pass note on to the person.\n"
                   "Safeguards: removals are withheld when a run reached under 90% of the site, so a blocked crawl "
                   "never reports pages as gone. A project's first run is a baseline with nothing to compare.\n"
                   "Read-only and free: it reads stored data and never fetches.")
@@ -2735,6 +2876,8 @@ def get_changes(project_id: ProjectId, run_id: RunId = None,
         for k in ("feed", "fields", "withheld"):
             if isinstance(ch.get(k), list):
                 ch[k] = ch[k][:200]
+        if isinstance(ch, dict):
+            _explain_pair(ch)
         # Its runs as start_run, list_runs and get_project give them: counts as
         # numbers under one name each, not the screen's text beside them (MCP
         # re-test 6, 11 Nov 2026).
