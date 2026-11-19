@@ -164,8 +164,10 @@ def test_a_page_limit_says_whether_the_tier_it_needs_is_likely_to_read_it(likely
 
 
 def test_search_web_says_how_a_search_is_read_and_charged_today():
-    """DuckDuckGo between Google and Bing, and one price for a search
-    (Seam-be #97, live 13 Nov 2026): no "4 credits or more"."""
+    """DuckDuckGo between Google and Bing, and one price for a search: 8
+    credits when Google answers, 4 for DuckDuckGo's or Bing's page (from 20
+    Nov 2026; Seam-be #97 made it one price): no "or more"."""
     text = mcp_mod._build()._tool_manager.get_tool("search_web").description
-    assert "DuckDuckGo" in text and "at most 4 credits a search" in text
+    assert "DuckDuckGo" in text and "8 credits a search when Google answers" in text
+    assert "is 4 when its results are used" in text and "at most 8" in text
     assert "or more" not in text and "Bing's when Google refuses" not in text

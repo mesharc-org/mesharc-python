@@ -6,6 +6,10 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **`search_web` and `create_monitor` give the new search price.** A search costs 8 credits when Google answers, whatever read its results page, and 4 when DuckDuckGo's or Bing's page is used; a search costs at most 8. A monitored search's run is 4 to 8 credits.
+
 ## 0.7.10 - 2026-11-19
 
 ### Added
