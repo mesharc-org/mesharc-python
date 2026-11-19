@@ -49,23 +49,28 @@ issue.
 
 ## Releasing (maintainers)
 
-Releases are published from a tag, by `.github/workflows/release.yml`, through PyPI trusted
-publishing. No token is stored anywhere.
+Releases are published by `.github/workflows/release.yml`, through PyPI trusted publishing. No
+token is stored anywhere. Releasing is merging a version bump:
 
 1. In one pull request, set the new version in `pyproject.toml` and `mesharc/__init__.py`, and
    rename `## Unreleased` in `CHANGELOG.md` to that version, leaving a fresh empty
    `## Unreleased` above it.
-2. After it is merged, tag the merge commit and push the tag:
+2. Merge it. On `main`, the workflow finds that version has no tag yet: it checks that the
+   version and the changelog agree, tests and builds the package, then waits for an owner to
+   approve the `pypi` environment. Once approved it publishes to PyPI (with attestations),
+   creates the tag `vX.Y.Z` on the merge commit, and the GitHub Release from the changelog
+   section, with `mcp-tools.json` (the MCP server's tools, from `scripts/mcp_tools.py`).
 
-   ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
+A merge that leaves the version alone releases nothing. Pushing a `v*` tag by hand still
+releases that tag, as before, but only for a version that was not merged as a bump: after a
+bump is merged, the workflow makes the tag itself, and a tag pushed by hand as well would start
+a second release of the same version.
 
-3. The workflow checks that the tag, the version and the changelog agree, tests and builds the
-   package, then waits for an owner to approve the `pypi` environment. Once approved it
-   publishes to PyPI (with attestations) and creates the GitHub Release from the changelog
-   section.
+- Declining the `pypi` approval does not cancel the release: the version is still untagged, so
+  the next merge to `main` asks again.
+- If PyPI accepted the release but creating the tag or the GitHub Release failed, open that run
+  and use **Re-run failed jobs**. A new run would ask to publish the same version again, which
+  PyPI refuses.
 
 Versioning follows [SemVer](https://semver.org). While the version is 0.x, a minor release may
 contain breaking changes, and the changelog says so. A Python version is supported until six
