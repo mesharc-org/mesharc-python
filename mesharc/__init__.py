@@ -1416,14 +1416,14 @@ class MeshArc:
                    idempotency_key: Optional[str] = None, news: bool = False, page: Optional[int] = None) -> Json:
         """Search the web. Returns the whole envelope, the hits under ``data``.
 
-        Needs an API key that can write, and spends credits: a results page
-        every engine refused is free, an equal search (same query, ``news``,
+        Needs an API key that can write, and spends credits: 8 a search, and
+        one with no results to be had is free; an equal search (same query, ``news``,
         ``page``, ``country``, ``lang``, ``freshness`` and domains) within the
         hour of a finished one -- ten minutes for news -- comes from the
         cache with no results-page charge, and scraped pages are charged
-        even then. ``news=True`` searches the engines' news results instead
+        even then. ``news=True`` searches news results instead
         of the web's, and each hit also carries ``publisher`` and ``age``
-        (as the engine put it, e.g. ``"20h"``). ``page`` is which results
+        (as its source put it, e.g. ``"20h"``). ``page`` is which results
         page, 1 to 10: page 2 is results 11-20, each page its own search
         and its own charge. ``freshness`` is ``hour``, ``day``,
         ``week``, ``month`` or ``year``. ``scrape=True`` also fetches each
@@ -1433,10 +1433,10 @@ class MeshArc:
         ``screenshot`` and ``json``. A search that scrapes stays ``running``
         until its pages land, with the hits already in ``data``.
 
-        A ``blocked`` search (no engine answered) is returned, not raised;
-        its ``outcome`` says why: ``"no_results"`` (every engine refused or
-        had nothing; nothing charged) or ``None`` (it did not run: the
-        credits left could not pay for a results page). ``error`` raises
+        A ``blocked`` search (no results) is returned, not raised;
+        its ``outcome`` says why: ``"no_results"`` (no results could be
+        read; nothing charged) or ``None`` (it did not run: the credits
+        left could not pay for it). ``error`` raises
         ``MeshArcError``. ``timeout_s`` is how
         long the API holds the request open (60 by default when waiting,
         120 at most); a slower search is then polled every ``poll`` seconds
@@ -1464,7 +1464,7 @@ class MeshArc:
             return out
         deadline = time.time() + timeout
         while True:
-            # "blocked": no engine answered (`outcome` says why). "no_results"
+            # "blocked": no results (`outcome` says why). "no_results"
             # is read too, though the API keeps "blocked".
             if out.get("status") in ("done", "no_results", "blocked"):
                 return _tell(out)

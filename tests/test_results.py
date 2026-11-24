@@ -537,7 +537,7 @@ def test_a_search_with_no_results_says_why(monkeypatch):
     monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
     out = mcp_mod.search_web("q")
     assert out["status"] == "no_results" and out["results"] == []
-    assert out["attempts"] == nothing["attempts"], "the attempts say why, as for an older API's blocked"
+    assert "attempts" not in out and "engine" not in out, "no engine is named, even from an older API"
 
 
 def test_a_blocked_search_says_how_it_was_refused(monkeypatch):
@@ -548,7 +548,7 @@ def test_a_blocked_search_says_how_it_was_refused(monkeypatch):
     out = mcp_mod.search_web("q")
     assert out["status"] == "blocked" and out["results"] == []
     assert out["error"] == "every engine refused the results page"
-    assert out["attempts"] == blocked["attempts"]
+    assert "attempts" not in out
     assert "outcome" not in out, "an API without `outcome` hands none on"
 
 
@@ -560,7 +560,7 @@ def test_a_blocked_search_hands_on_its_outcome(monkeypatch):
         monkeypatch.setattr(mcp_mod, "_client", lambda b=blocked: _Searches(b))
         monkeypatch.setattr(mcp_mod, "_budget", lambda: None)
         out = mcp_mod.search_web("q")
-        assert (out["status"], out["outcome"], out["attempts"]) == ("blocked", outcome, blocked["attempts"])
+        assert (out["status"], out["outcome"], "attempts" in out) == ("blocked", outcome, False)
 
 
 def test_a_done_search_carries_no_outcome(monkeypatch):

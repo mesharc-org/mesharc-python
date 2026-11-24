@@ -6,6 +6,10 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **A search names no engine, and costs one price.** `search_web` gives each result's `position`, `title`, `url`, `snippet` and `source` (and a news result's `publisher` and `age`), without `engine`; the answer has no `engine`, and a blocked one no `attempts` -- its `outcome` and `error` say why. A search costs 8 credits, whatever read it and whichever engine answered; one with no results to be had is free. `search_web` and `create_monitor` say so, and name no engine. The API answers this way from 24 Nov 2026; from an older one, `engine` and `attempts` are not handed on either.
+
 ## 0.7.11 - 2026-11-20
 
 ### Changed

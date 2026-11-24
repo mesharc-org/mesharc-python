@@ -149,30 +149,30 @@ out = arc.web_search(
     scrape=True,                        # each result's page as markdown as well
 )
 
-if out["status"] == "blocked":          # every engine refused; nothing was charged
-    print(out["attempts"])
+if out["status"] == "blocked":          # no results; nothing was charged
+    print(out["outcome"], out["error"])
 else:
     for hit in out["data"]:
         print(hit["position"], hit["title"], hit["url"], hit["snippet"])
         if hit.get("page"):
             print(hit["page"].get("markdown", "")[:200])
-print(out["engine"], out["cached"], out["creditsUsed"])
+print(out["cached"], out["creditsUsed"])
 
 again = arc.get_search(out["id"])       # a search started earlier, by id
 for s in arc.searches(q="python"):      # the workspace's searches, newest first
     print(s["id"], s["query"], s["status"], s["resultCount"], s["creditsUsed"])
 
-news = arc.web_search("python release", news=True, freshness="day")   # the engines' news results
+news = arc.web_search("python release", news=True, freshness="day")   # news results
 for hit in news["data"]:
     print(hit["publisher"], hit["age"], hit["title"])                  # who published it, and how long ago ('20h')
 more = arc.web_search("python packaging guide", page=2)               # results 11-20
 ```
 
-`web_search` waits for the results and returns the whole envelope, the hits under `data`. A search is `queued`, `running`, `done`, `blocked` or `error`: `blocked` — every engine refused — is returned, not raised; `error` raises `MeshArcError`. A search that scrapes stays `running` until its pages land. `scrape=` also takes a dict, sent as given (`{"formats": ["markdown", "links"], "maxCredits": 20}`); `country=` and `lang=` say where and in what language to search; `wait=False` returns at once, and `timeout_s` is how long the API holds the request (60 s by default, 120 at most) before the client polls.
+`web_search` waits for the results and returns the whole envelope, the hits under `data`. A search is `queued`, `running`, `done`, `blocked` or `error`: `blocked` — no results — is returned, not raised; `error` raises `MeshArcError`. A search that scrapes stays `running` until its pages land. `scrape=` also takes a dict, sent as given (`{"formats": ["markdown", "links"], "maxCredits": 20}`); `country=` and `lang=` say where and in what language to search; `wait=False` returns at once, and `timeout_s` is how long the API holds the request (60 s by default, 120 at most) before the client polls.
 
-`news=True` searches the engines' news results rather than the web's (one or the other per search); each news hit also carries `publisher` and `age`, as the engine put it (`"20h"`). `page=` is which results page, 1 to 10: page 2 is results 11–20, and each page is its own search with its own charge.
+`news=True` searches news results rather than the web's (one or the other per search); each news hit also carries `publisher` and `age`, as its source put it (`"20h"`). `page=` is which results page, 1 to 10: page 2 is results 11–20, and each page is its own search with its own charge.
 
-A search needs a key that can write, and it spends credits. The results page costs the engine that read it; a results page every engine refused is free. An equal search — same query, `news`, `page`, `country`, `lang`, `freshness` and domains — within an hour of a finished one (ten minutes for news) comes from the cache (`cached` is true) with no charge for the results page. Scraped pages are charged, cached or not.
+A search needs a key that can write, and it spends credits. A search costs 8 credits, whatever read it; one with no results to be had is free. An equal search — same query, `news`, `page`, `country`, `lang`, `freshness` and domains — within an hour of a finished one (ten minutes for news) comes from the cache (`cached` is true) with no charge for the results page. Scraped pages are charged, cached or not.
 
 `arc.search(project_id, q)` is something else: it searches the pages a project has stored, not the web (see below).
 
