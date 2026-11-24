@@ -179,7 +179,7 @@ class ScrapeOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `outlook` "
         "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
         "workspace set itself."))]
 
@@ -229,7 +229,7 @@ class CrawlOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `outlook` "
         "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
         "workspace set itself."))]
 
@@ -470,7 +470,7 @@ class JobOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `outlook` "
         "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
         "workspace set itself."))]
 
@@ -500,15 +500,14 @@ class SearchWebOut(TypedDict, total=False):
         "the stealth trial or the credits left). Tell the person; it comes first in the answer."))]
     id: Annotated[Any, Field(description="The search's id: for get_job with kind 'search'.")]
     status: Annotated[Any, Field(description=(
-        "'done'; 'blocked' when no engine answered (see `outcome`); 'running' with a `job` "
+        "'done'; 'blocked' when it has no results (see `outcome`); 'running' with a `job` "
         "while it goes on (with only a `note` in the rare case a search whose answer was lost could not be "
         "found). On an error, the HTTP status code."))]
     outcome: Annotated[Any, Field(description=(
-        "With status 'blocked': 'no_results' when every engine refused the results page or had nothing about "
-        "the query (nothing charged); null when the search did not run because the credits left could not pay "
-        "for a results page -- tell the person, as a top-up or a plan change fixes it."))]
+        "With status 'blocked': 'no_results' when no results could be read for the query (nothing charged); "
+        "null when the search did not run because the credits left could not pay for it -- tell the person, as "
+        "a top-up or a plan change fixes it."))]
     query: Annotated[Any, Field(description="The query as searched.")]
-    engine: Annotated[Any, Field(description="The engine whose results page answered: 'google', 'duckduckgo' or 'bing'.")]
     cached: Annotated[Any, Field(description=(
         "true when an equal search within the hour (ten minutes for news) answered it, with no charge for the "
         "results page."))]
@@ -517,10 +516,9 @@ class SearchWebOut(TypedDict, total=False):
         "With status 'running': how long, in milliseconds, this call waited for the search before handing "
         "back its job."))]
     results: Annotated[Any, Field(description=(
-        "Up to 10, as ranked, each {position, title, url, snippet, source, engine}; a news result also "
-        "{publisher, age}, age as the engine put it, e.g. '20h'; when scraped also `page`, "
+        "Up to 10, as ranked, each {position, title, url, snippet, source}; a news result also "
+        "{publisher, age}, age as its source put it, e.g. '20h'; when scraped also `page`, "
         "{url, title, words, status, links (a count), markdown excerpt}, the excerpts sharing 60,000 characters."))]
-    attempts: Annotated[Any, Field(description="Blocked only: each engine tried, and why it was refused.")]
     job: Annotated[Any, Field(description=(
         "While it is still going: {kind: 'search', id} for get_job. A scraping search can carry its results and "
         "a job for the pages still landing."))]
@@ -531,7 +529,7 @@ class SearchWebOut(TypedDict, total=False):
     code: Annotated[Any, Field(description=_CODE)]
     detail: Annotated[Any, Field(description=_DETAIL)]
     notices: Annotated[Any, Field(description=(
-        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, `engine` on a search's and `outlook` "
+        "With `notice`: one per reason, {reason, pages, needs, examples, unlockedBy, upgradeUrl}, and `outlook` "
         "{tier, likely, why} on a page's; unlockedBy is the plan that reads them, null for credits or a cap the "
         "workspace set itself."))]
 
@@ -857,8 +855,8 @@ def _limit_notice(notices=None, page=None):
         return {}
     return {"notice": " ".join(str(n["message"]) + _outlook_line(n.get("outlook")) for n in rows),
             "notices": [{k: n.get(k) for k in ("reason", "pages", "needs", "examples", "unlockedBy", "upgradeUrl",
-                                               "engine", "outlook")
-                         if k not in ("engine", "outlook") or n.get(k)}
+                                               "outlook")
+                         if k != "outlook" or n.get(k)}
                         for n in rows]}
 
 
@@ -1751,17 +1749,16 @@ def _shape_search(out, hits, running, reserve):
     how = "call scrape_urls with that url"
     # A news result also says who published it and how old it is; a web
     # result has neither, and is not given two nulls for them.
-    results = [{**{k: h.get(k) for k in ("position", "title", "url", "snippet", "source", "engine")},
+    results = [{**{k: h.get(k) for k in ("position", "title", "url", "snippet", "source")},
                 **{k: h[k] for k in ("publisher", "age") if h.get(k) is not None}}
                for h in hits]
     paged = [i for i, h in enumerate(hits) if isinstance(h.get("page"), dict)]
     shaped = {"id": out.get("id", ""), "status": out.get("status"), "query": out.get("query", ""),
-              "engine": out.get("engine", ""), "cached": bool(out.get("cached")),
+              "cached": bool(out.get("cached")),
               "creditsUsed": out.get("creditsUsed"), "results": results}
     if out.get("error"):
         shaped["error"] = out["error"]
     if out.get("status") in ("no_results", "blocked"):       # the API says "blocked", with `outcome`
-        shaped["attempts"] = out.get("attempts") or []
         if "outcome" in out:
             shaped["outcome"] = out["outcome"]
     notes = []
@@ -1785,25 +1782,22 @@ def _shape_search(out, hits, running, reserve):
 @tool(title="Search the web",
       annotations=_acts(),
       description="Search the web for a query and return the ranked results, each with its title, url and "
-                  "snippet. The results are read from Google's results page; when Google refuses or reads short, "
-                  "from DuckDuckGo's and then Bing's, and the answer with most results about the query is given, "
-                  "topped up from the others.\n"
+                  "snippet: organic web results, no ads or AI summaries.\n"
                   "Use it to find pages whose URLs you do not know. It searches the web, unlike list_pages with q, "
                   "which searches inside a project's stored run. For URLs you already have use scrape_urls; "
                   "scrape_urls with full=true reads one result in full.\n"
                   "Inputs: query as typed into a search engine, e.g. 'python http client'. source='news' searches "
-                  "the engines' news results instead of the web's, for recent coverage of a company, person or "
-                  "event: each result also says who published it (publisher) and how old it is as the engine put "
-                  "it (age, e.g. '20h'); DuckDuckGo has no news page and is not asked. scrape=true also fetches "
+                  "news results instead of the web's, for recent coverage of a company, person or event: each "
+                  "result also says who published it (publisher) and how old it is (age, e.g. '20h'). "
+                  "scrape=true also fetches "
                   "each result's page as markdown in the same call. include_domains=['python.org'] keeps the search "
                   "to those sites; exclude_domains drops sites, and an exclude wins.\n"
-                  "Cost: 8 credits a search when Google answers, whatever read its results page; DuckDuckGo's or "
-                  "Bing's page is 4 when its results are used, and a search costs at most 8. A results page an engine refused, "
-                  "or one about something else, is free. An equal search (same query, source, country, lang, "
+                  "Cost: 8 credits a search, whatever read it. A search with no results to be had is free. An "
+                  "equal search (same query, source, country, lang, "
                   "freshness and domains) within an hour of a finished one, or ten minutes for news, comes from "
                   "cache with no charge for the results page. Scraped pages are charged, cached or not.\n"
-                  "Timing: it waits for the results. A search aims to answer within about 35 seconds; a retry on the "
-                  "residential browser after Google's wall can take longer. If a search outlasts the connection's "
+                  "Timing: it waits for the results. A search aims to answer within about 35 seconds and can take "
+                  "longer. If a search outlasts the connection's "
                   "time limit, a job comes "
                   "back for get_job; a scraping search whose pages are still landing returns its results with a "
                   "job for the pages. A dropped connection is retried without searching twice, and when the "
@@ -1832,7 +1826,7 @@ def search_web(query: Annotated[str, Field(
                    description="true also fetches each result's page as markdown; each page costs credits. "
                                "false (default) returns the results only.")] = False,
                source: Annotated[Literal["web", "news"], Field(
-                   description="'web' (default) searches the web's results; 'news' the engines' news results, "
+                   description="'web' (default) searches the web's results; 'news' news results, "
                                "each with its publisher and age.")] = "web") -> SearchWebOut:
     def go():
         # Sent as given: the field's bounds refuse 0 or 50 here, and the API
@@ -2190,7 +2184,7 @@ def _monitor_run(r):
                   "optional urls, schema and allowed_domains (omitted, it stays on the sites of urls, as run_agent "
                   "does). schedule is hourly, daily or weekly. follow_rows=true follows a list answer record by "
                   "record (read with get_monitor_rows).\n"
-                  "Cost: each run is charged as the search or agent run it is -- a results page 4 to 8 credits, "
+                  "Cost: each run is charged as the search or agent run it is -- a search 8 credits, "
                   "an agent run up to max_credits -- and the first run starts now. max_credits_per_month skips "
                   "runs once the month has spent that much.\n"
                   "Effect: it answers with the monitor; list_monitors shows its runs. pause_monitor stops it.\n"

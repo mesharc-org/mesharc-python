@@ -136,10 +136,12 @@ def test_the_notice_comes_first_in_the_structured_answer_too(tool):
     assert keys[0] == "notice" and keys.index("notices") > keys.index("note")
 
 
-def test_a_search_notice_keeps_the_engine_it_names():
+def test_a_search_notice_names_no_engine():
+    """Since 24 Nov 2026 a search's answer names no engine; an older API's
+    `engine` on a notice is not handed on either."""
     search = {**NOTICE, "pages": 1, "examples": [], "engine": "google"}
-    assert mcp_mod._limit_notice([search])["notices"][0]["engine"] == "google"
-    assert "engine" not in mcp_mod._limit_notice([NOTICE])["notices"][0], "absent where the API sends none"
+    assert "engine" not in mcp_mod._limit_notice([search])["notices"][0]
+    assert "engine" not in mcp_mod._limit_notice([NOTICE])["notices"][0]
 
 
 @pytest.mark.parametrize("likely, said", [
@@ -163,11 +165,10 @@ def test_a_page_limit_says_whether_the_tier_it_needs_is_likely_to_read_it(likely
     assert mcp_mod._limit_notice(page={"url": "u", "limit": LIMIT})["notice"] == LIMIT["message"]
 
 
-def test_search_web_says_how_a_search_is_read_and_charged_today():
-    """DuckDuckGo between Google and Bing, and one price for a search: 8
-    credits when Google answers, 4 for DuckDuckGo's or Bing's page (from 20
-    Nov 2026; Seam-be #97 made it one price): no "or more"."""
+def test_search_web_says_how_a_search_is_charged_today():
+    """One flat price, 8 credits a search, and no engine named (24 Nov 2026:
+    until then 8 when Google answered and 4 for DuckDuckGo's or Bing's)."""
     text = mcp_mod._build()._tool_manager.get_tool("search_web").description
-    assert "DuckDuckGo" in text and "8 credits a search when Google answers" in text
-    assert "is 4 when its results are used" in text and "at most 8" in text
-    assert "or more" not in text and "Bing's when Google refuses" not in text
+    assert "8 credits a search, whatever read it" in text
+    assert not any(name in text for name in ("Google", "DuckDuckGo", "Bing")), "no engine is named"
+    assert "or more" not in text and "at most 8" not in text
