@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-__version__ = "0.7.12"
+__version__ = "0.7.13"
 __all__ = ["MeshArc", "MeshArcError", "MeshArcTimeoutError", "Crawl", "AgentRun"]
 TENANT_HEADER = "X-MeshArc-Tenant"
 
