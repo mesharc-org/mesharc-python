@@ -6,6 +6,10 @@ All notable changes to this package are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **Hosted, a slow call hands back its job sooner.** A tool on the hosted server now holds the connection for at most 35 seconds (45 until now, `MESHARC_MCP_WAIT` still overrides it) before answering with a job for `get_job`. Claude's connector gives up on a call at about 40 seconds, so a search that ran past that came back as "the connector's server isn't responding" rather than as its job, though it finished server-side.
+
 ## 0.7.12 - 2026-11-24
 
 ### Changed

@@ -700,7 +700,11 @@ _HTTP = False
 # server cannot know which one is calling. 25 was too short for a web search:
 # Google's results page is rendered and its links resolved, about 20 seconds,
 # and every search came back as a job to poll (MCP testing, 10 Nov 2026).
-WAIT_DEFAULT_S = 45.0
+# 45 was too long for Claude's connector, which gives up at about 40 s: a
+# search that ran on past 40 s came back as "the connector's server isn't
+# responding" rather than as its job, though it finished server-side (MCP
+# testing, 25 Nov 2026). A search answers in 12-21 s on the worker now.
+WAIT_DEFAULT_S = 35.0
 
 _CLIENT = None
 # Hosted mode: one client per caller, keyed by the hash of their token. The
